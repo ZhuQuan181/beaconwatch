@@ -1,0 +1,229 @@
+"""FastAPI routes — HTTP + WebSocket."""
+from __future__ import annotations
+
+import asyncio
+import contextlib
+from collections.abc import AsyncIterator
+from datetime import datetime, timedelta, timezone
+from typing import Annotated
+
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from .bus import ObservationBus
+from .db import get_session
+from .models import DroneObservation, DroneSummary, Position, Station
+from .repository import (
+    drone_to_summary,
+    get_drone,
+    list_drones,
+    list_observations,
+    list_stations,
+)
+
+router = APIRouter()
+
+
+# ── Stations ──────────────────────────────────────────────────────────
+@router.get("/stations", response_model=list[Station])
+async def get_stations(
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> list[Station]:
+    rows = await list_stations(session)
+    return [
+        Station(
+            station_id=r.station_id,
+            name=r.name,
+            lat=r.lat,
+            lon=r.lon,
+            alt_m=r.alt_m,
+            online=r.online,
+            last_seen=r.last_seen,
+            firmware_version=r.firmware_version,
+        )
+        for r in rows
+    ]
+
+
+# ── Drones ────────────────────────────────────────────────────────────
+@router.get("/drones", response_model=list[DroneSummary])
+async def get_drones(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    limit: Annotated[int, Query(ge=1, le=1000)] = 200,
+    online_within_s: Annotated[int, Query(ge=0, le=86400 * 30)] = 60,
+) -> list[DroneSummary]:
+    rows = await list_drones(session, limit=limit, online_within_s=online_within_s)
+    return [drone_to_summary(r) for r in rows]
+
+
+@router.get("/drones/{drone_id}", response_model=DroneSummary)
+async def get_drone_by_id(
+    drone_id: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> DroneSummary:
+    row = await get_drone(session, drone_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="drone not found")
+    return drone_to_summary(row)
+
+
+# ── Observations ──────────────────────────────────────────────────────
+@router.get("/observations", response_model=list[DroneObservation])
+async def get_observations(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    limit: Annotated[int, Query(ge=1, le=1000)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    drone_id: Annotated[str | None, Query()] = None,
+    station_id: Annotated[str | None, Query()] = None,
+    bbox: Annotated[
+        str | None,
+        Query(
+            description="min_lon,min_lat,max_lon,max_lat",
+            pattern=r"^-?\d+(\.\d+)?,-?\d+(\.\d+)?,-?\d+(\.\d+)?,-?\d+(\.\d+)?$",
+        ),
+    ] = None,
+    since_seconds: Annotated[int | None, Query(ge=0, le=86400)] = None,
+) -> list[DroneObservation]:
+    parsed_bbox: tuple[float, float, float, float] | None = None
+    if bbox is not None:
+        try:
+            parsed_bbox = tuple(float(x) for x in bbox.split(","))  # type: ignore[assignment]
+        except ValueError as e:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, detail=f"invalid bbox: {e}"
+            ) from e
+    since: datetime | None = None
+    if since_seconds is not None:
+        since = datetime.now(timezone.utc) - timedelta(seconds=since_seconds)
+    rows = await list_observations(
+        session,
+        limit=limit,
+        offset=offset,
+        drone_id=drone_id,
+        station_id=station_id,
+        bbox=parsed_bbox,
+        since=since,
+    )
+    return [_row_to_observation(r) for r in rows]
+
+
+# ── WebSocket: live stream ────────────────────────────────────────────
+def _bus_from_app_state(websocket: WebSocket) -> ObservationBus:
+    """FastAPI dep that pulls the bus from app.state (set at lifespan startup).
+
+    Defined as a function (not a lambda) so FastAPI's dependency analyzer
+    can introspect the parameter type.
+    """
+    return websocket.app.state.bus
+
+
+@router.websocket("/ws/observations", name="ws_observations")
+async def ws_observations(
+    websocket: WebSocket,
+    bus: Annotated[ObservationBus, Depends(_bus_from_app_state)],
+) -> None:
+    """Fan out newly-persisted observations as JSON frames.
+
+    Protocol (server → client):
+        {"type": "obs", "data": <DroneObservation>}
+
+    The connection is closed by the server if the client sends anything
+    other than the optional ``{"type": "ping"}`` heartbeats.
+    """
+    await websocket.accept()
+    async with bus.subscribe() as queue:
+        try:
+            while True:
+                # Race the receive (heartbeat) against the next bus item.
+                receive_task = asyncio.create_task(websocket.receive_text())
+                get_task = asyncio.create_task(queue.get())
+                done, pending = await asyncio.wait(
+                    {receive_task, get_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for t in pending:
+                    t.cancel()
+                if get_task in done:
+                    obs = get_task.result()
+                    await websocket.send_json(
+                        {"type": "obs", "data": obs.model_dump(mode="json")}
+                    )
+                if receive_task in done:
+                    msg = receive_task.result()
+                    if msg and msg.strip() != '{"type":"ping"}':
+                        await websocket.close(code=1003, reason="no client→server msgs")
+                        return
+        except WebSocketDisconnect:
+            pass
+        except Exception:
+            with contextlib.suppress(Exception):
+                await websocket.close()
+
+
+# ── Helpers ───────────────────────────────────────────────────────────
+def _row_to_observation(r) -> DroneObservation:
+    return DroneObservation(
+        observation_id=r.observation_id,
+        drone_id=r.drone_id,
+        operator_id=r.operator_id,
+        station_id=r.station_id,
+        protocol=r.protocol,
+        position=Position(
+            lat=r.position_lat,
+            lon=r.position_lon,
+            alt_m=r.position_alt_m,
+            accuracy_h_m=0.0,
+            accuracy_v_m=0.0,
+            speed_mps=r.speed_mps,
+            heading_deg=r.heading_deg,
+        ),
+        drone_timestamp=r.drone_timestamp,
+        received_at=r.received_at,
+        self_id=r.self_id or "",
+    )
+
+
+# Known route prefixes (for the 404 hint).  We don't introspect the
+# router here because that would couple routes.py to a specific
+# FastAPI version, and a hand-maintained list is easier to audit.
+_KNOWN_PREFIXES: tuple[str, ...] = (
+    "/stations",
+    "/drones",
+    "/observations",
+    "/healthz",
+    "/metrics",
+    "/ws/observations",
+    "/docs",
+    "/openapi.json",
+    "/redoc",
+)
+
+
+def _row_to_observation(r) -> DroneObservation:
+    return DroneObservation(
+        observation_id=r.observation_id,
+        drone_id=r.drone_id,
+        operator_id=r.operator_id,
+        station_id=r.station_id,
+        protocol=r.protocol,
+        position=Position(
+            lat=r.position_lat,
+            lon=r.position_lon,
+            alt_m=r.position_alt_m,
+            accuracy_h_m=0.0,
+            accuracy_v_m=0.0,
+            speed_mps=r.speed_mps,
+            heading_deg=r.heading_deg,
+        ),
+        drone_timestamp=r.drone_timestamp,
+        received_at=r.received_at,
+        self_id=r.self_id or "",
+    )

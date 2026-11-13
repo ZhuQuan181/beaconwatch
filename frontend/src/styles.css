@@ -1,0 +1,189 @@
+.app {
+  display: grid;
+  grid-template-columns: 360px 1fr;
+  grid-template-rows: 48px 1fr;
+  height: 100vh;
+  background: #0b0d12;
+  color: #e6e9ef;
+  font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+header.topbar {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+  background: #11141b;
+  border-bottom: 1px solid #1c2030;
+}
+header.topbar h1 {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0;
+  letter-spacing: 0.5px;
+}
+header.topbar .spacer {
+  flex: 1;
+}
+header.topbar .stat {
+  font-size: 12px;
+  color: #9aa3b2;
+}
+
+aside.sidebar {
+  background: #0f1219;
+  border-right: 1px solid #1c2030;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+aside.sidebar .section {
+  padding: 12px 14px;
+  border-bottom: 1px solid #1c2030;
+}
+aside.sidebar h2 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: #6f7a8c;
+  margin: 0 0 8px;
+}
+
+.map-container {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.obs-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  flex: 1;
+  overflow-y: auto;
+}
+.obs-list.empty {
+  padding: 16px;
+  color: #6f7a8c;
+  font-style: italic;
+}
+.obs-row {
+  padding: 10px 14px;
+  border-bottom: 1px solid #1c2030;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.obs-row:hover {
+  background: #161a24;
+}
+.obs-row.selected {
+  background: #1f2940;
+  border-left: 3px solid #5cc8ff;
+  padding-left: 11px;
+}
+.obs-row-1 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.obs-row-1 .drone-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  color: #ff8a8a;
+  font-weight: 500;
+}
+.obs-row-2 {
+  display: flex;
+  gap: 12px;
+  font-size: 12px;
+  color: #c4cbd9;
+}
+.obs-row-3 {
+  font-size: 11px;
+  margin-top: 2px;
+}
+.dim {
+  color: #6f7a8c;
+}
+
+.tag {
+  display: inline-block;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: #2a2f3d;
+  color: #9aa3b2;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.tag.proto-wifi_beacon {
+  background: #2a4d3a;
+  color: #7ad9a3;
+}
+.tag.proto-ble {
+  background: #2a3d4d;
+  color: #7ad9e0;
+}
+.tag.proto-wifi_nan {
+  background: #4d3a2a;
+  color: #e0c47a;
+}
+
+.conn-badge {
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 600;
+}
+.conn-ok {
+  background: #1a3a23;
+  color: #5fd385;
+}
+.conn-down {
+  background: #3a1a1a;
+  color: #ff7575;
+}
+.conn-unknown {
+  background: #2a2a3a;
+  color: #9aa3b2;
+}
+
+.ws-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+}
+.ws-online {
+  background: #5fd385;
+  box-shadow: 0 0 6px #5fd385;
+}
+.ws-offline {
+  background: #ff7575;
+}
+
+.station-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  padding: 4px 0;
+  color: #c4cbd9;
+}
+.station-row .dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  margin-right: 6px;
+}
+.dot.online {
+  background: #5fd385;
+}
+.dot.offline {
+  background: #6f7a8c;
+}

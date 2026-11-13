@@ -1,0 +1,45 @@
+[project]
+name = "rid-edge"
+version = "0.1.0"
+description = "Drone Remote ID edge receiver (Wi-Fi + BLE -> MQTT)"
+requires-python = ">=3.11"
+dependencies = [
+    "scapy>=2.5.0",
+    "bleak>=0.21.1",
+    "aiomqtt>=2.0.0",
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+    "PyYAML>=6.0",
+    "structlog>=24.1.0",
+    "orjson>=3.9.0",
+    "websockets>=12.0",
+    "aiohttp>=3.9.0",
+    "uvloop>=0.19; sys_platform != 'win32'",
+    "python-dateutil>=2.8.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.1.0",
+    "mypy>=1.7.0",
+    "types-PyYAML",
+]
+
+[project.scripts]
+rid-edge = "rid_edge.main:run"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["rid_edge*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-v --tb=short"
