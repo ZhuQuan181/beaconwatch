@@ -8,10 +8,8 @@ identical for both transports.
 from __future__ import annotations
 
 import struct
-from typing import Iterable
 
-from scapy.layers.dot11 import Dot11, Dot11Beacon, Dot11Elt
-from scapy.packet import Raw
+from scapy.layers.dot11 import Dot11Elt
 
 from rid_edge.odid_parser import basic_id, location, message_pack, self_id
 from rid_edge.odid_parser.constants import (
@@ -127,10 +125,10 @@ def _parse_odid_bytes(buf: bytes) -> message_pack.ParsedSubmessages | None:
             return None
         return message_pack.ParsedSubmessages(basic_id=[b])
     if mt == MsgType.LOCATION << 4:
-        l = location.decode(buf)
-        if l is None:
+        loc = location.decode(buf)
+        if loc is None:
             return None
-        return message_pack.ParsedSubmessages(locations=[l])
+        return message_pack.ParsedSubmessages(locations=[loc])
     if mt == MsgType.SELF_ID << 4:
         s = self_id.decode(buf)
         if s is None:

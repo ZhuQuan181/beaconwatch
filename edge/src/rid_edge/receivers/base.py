@@ -15,7 +15,7 @@ import abc
 import enum
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator
 
 
 class Bearer(str, enum.Enum):

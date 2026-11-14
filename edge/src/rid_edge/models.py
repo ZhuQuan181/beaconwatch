@@ -8,7 +8,6 @@ All edges and the server agree on the wire format defined by RidObservation.
 from __future__ import annotations
 
 import enum
-import json
 from datetime import datetime, timezone
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator

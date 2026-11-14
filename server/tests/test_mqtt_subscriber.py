@@ -6,17 +6,13 @@ takes (topic, payload) and is fully testable as a unit.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
-import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-import rid_server.db as db_mod
 from rid_server.mqtt_subscriber import MqttSubscriber
 from rid_server.repository import (
     list_drones,
-    list_stations,
     upsert_station,
 )
 

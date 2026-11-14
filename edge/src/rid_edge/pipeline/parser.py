@@ -18,17 +18,14 @@ from __future__ import annotations
 
 import hashlib
 from datetime import datetime, timezone
-from typing import Iterable
 
 from ..models import (
-    OperatorLocation,
     Position,
     Protocol,
     RidObservation,
 )
 from ..odid_parser import basic_id as basic_id_mod
 from ..odid_parser import location as location_mod
-from ..odid_parser import self_id as self_id_mod
 from ..odid_parser.message_pack import ParsedSubmessages
 from ..receivers.base import Bearer, RawFrame
 from ..common.geo import is_zero_coordinate

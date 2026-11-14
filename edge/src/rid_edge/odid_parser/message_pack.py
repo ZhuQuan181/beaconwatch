@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import dataclasses
 import enum
-from typing import ClassVar
 
 from rid_edge.odid_parser import basic_id, location, self_id
 from rid_edge.odid_parser.constants import MsgType
@@ -137,7 +136,7 @@ def decode(payload: bytes) -> ParsedSubmessages | None:
     # body.  This is robust against off-by-one in legacy encoders.
     body = payload[2 : 2 + declared_size]
     if len(body) < declared_size:
-        body = payload[2:][truncated]
+        body = payload[2:]
 
     out = ParsedSubmessages()
     offset = 0

@@ -24,19 +24,14 @@ import asyncio
 import contextlib
 import logging
 from datetime import datetime, timezone
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator
 
 from bleak import BleakScanner
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 
-from rid_edge.odid_parser import frame_parser
-from rid_edge.odid_parser.constants import (
-    BLE_AD_TYPE_SERVICE_DATA_16,
-    BLE_ODID_SERVICE_UUID_16,
-)
 
-from .base import Bearer, RawFrame, Receiver, ReceiverError, parse_mac
+from .base import Bearer, RawFrame, Receiver, ReceiverError
 
 log = logging.getLogger(__name__)
 

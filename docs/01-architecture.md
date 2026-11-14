@@ -215,7 +215,7 @@ BLE adv       ──┘                                                       �
 ## 10. 项目目录
 
 ```
-/home/zq/code/rid-system/
+/home/zq/code/beaconwatch/
 ├── edge/                        # 边缘端
 │   ├── pyproject.toml
 │   ├── src/rid_edge/

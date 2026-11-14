@@ -1,13 +1,11 @@
 """Repository layer tests — exercises SQLAlchemy ORM directly."""
 from __future__ import annotations
 
-import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from rid_server.db import Drone, Observation, Station
+from rid_server.db import Drone
 from rid_server.models import DroneObservation, Position
 from rid_server.repository import (
-    get_drone,
     list_drones,
     list_observations,
     list_stations,
@@ -15,7 +13,6 @@ from rid_server.repository import (
     upsert_station,
     write_observation,
 )
-from sqlalchemy import select
 
 from conftest import make_obs
 

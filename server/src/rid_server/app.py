@@ -54,7 +54,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 def create_app() -> FastAPI:
-    settings = get_settings()
     app = FastAPI(
         title="RID Server",
         version="0.1.0",

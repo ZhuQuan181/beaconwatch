@@ -1,6 +1,6 @@
-# RID Frontend
+# BeaconWatch Frontend
 
-Live drone-detection dashboard for the RID system.
+Live drone-detection dashboard for BeaconWatch.
 
 ## Stack
 

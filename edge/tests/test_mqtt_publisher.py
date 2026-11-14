@@ -14,8 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sqlite3
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -24,7 +22,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from rid_edge.common.config import Settings
-from rid_edge.models import OperatorLocation, Position, Protocol, RidObservation
+from rid_edge.models import Position, Protocol, RidObservation
 from rid_edge.mqtt_publisher import MQTTPublisher, _OfflineBuffer
 
 
@@ -181,10 +179,12 @@ async def test_publisher_loop_drains_when_connected(settings: Settings) -> None:
 async def test_publisher_loop_buffers_when_disconnected(settings: Settings) -> None:
     pub = MQTTPublisher(settings)
     try:
-        # Stay disconnected; do NOT patch the client.
+        # Stay disconnected.  Also neutralise the connect loop: a broker
+        # may well be listening on 127.0.0.1:1883 (the dev stack), and
+        # this test must never depend on whether it is running.
+        pub._client.connect_async = MagicMock()
+        pub._client.loop_start = MagicMock()
         pub._connected = False
-        # Stop the connect loop too — it would otherwise try to connect
-        # to a real broker on 127.0.0.1:1883 every retry tick.
         await pub.start()
         await pub.publish(_make_obs("D1"))
         await pub.publish(_make_obs("D2"))

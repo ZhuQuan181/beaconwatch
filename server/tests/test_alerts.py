@@ -213,10 +213,9 @@ async def test_ingest_fires_alert_after_persisting(db_engine, _sqlite_settings, 
     Rules run after the commit, so anything an operator sees in the alert
     panel can be traced back to an observation in the database.
     """
-    import rid_server.db as db_mod
     from rid_server.mqtt_subscriber import MqttSubscriber
     from rid_server.repository import upsert_station, list_observations
-    from rid_server.models import Station as StationModel, DroneObservation, Position
+    from rid_server.models import Station as StationModel
     from sqlalchemy.ext.asyncio import async_sessionmaker
     import json
 

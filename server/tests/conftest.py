@@ -36,7 +36,6 @@ from rid_server.mqtt_subscriber import MqttSubscriber
 # in unit tests we just need the column to be a plain TEXT field for
 # assertion convenience.  We monkey-patch the sqlite-side hooks to
 # no-ops, which keeps the listener signatures intact but harmless.
-import geoalchemy2.admin  # noqa: E402  (ensure the listeners are registered)
 import geoalchemy2.admin.dialects.sqlite as _ga_sqlite  # noqa: E402
 
 _ga_sqlite.after_create = lambda *a, **kw: None

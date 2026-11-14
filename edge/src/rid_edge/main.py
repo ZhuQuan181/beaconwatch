@@ -17,9 +17,7 @@ import asyncio
 import contextlib
 import signal
 import sys
-from typing import Optional
 
-import structlog
 
 from rid_edge.common.config import get_settings
 from rid_edge.common.dedup import Deduper

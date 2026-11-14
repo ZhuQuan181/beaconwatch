@@ -24,17 +24,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
-import os
 import sqlite3
 import time
 from pathlib import Path
 from typing import Optional
 
-import orjson
 from paho.mqtt.client import Client as PahoClient
-from paho.mqtt.client import MQTTMessage
-from paho.mqtt import properties as paho_props
 
 from .common.backoff import compute_delay
 from .common.ulid import new_ulid
@@ -139,6 +134,8 @@ class MQTTPublisher:
         "_outbox",
         "_publisher_task",
         "_loop_task",
+        "_drain_task",
+        "_loop",
         "_connected",
         "_dropped",
         "_sent",
@@ -177,6 +174,8 @@ class MQTTPublisher:
 
         self._publisher_task: Optional[asyncio.Task] = None
         self._loop_task: Optional[asyncio.Task] = None
+        self._drain_task: Optional[asyncio.Task] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._connected = False
         self._sent = 0
         self._dropped = 0
@@ -187,18 +186,21 @@ class MQTTPublisher:
     async def start(self) -> None:
         if self._publisher_task is not None:
             return
+        self._loop = asyncio.get_running_loop()
         self._publisher_task = asyncio.create_task(self._publisher_loop())
         self._loop_task = asyncio.create_task(self._connect_loop())
 
     async def stop(self) -> None:
         self._close_event.set()
-        for t in (self._publisher_task, self._loop_task):
+        for t in (self._publisher_task, self._loop_task, self._drain_task):
             if t is not None:
                 t.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await t
         self._publisher_task = None
         self._loop_task = None
+        self._drain_task = None
+        self._loop = None
         self._buffer.close()
 
     # ---- public API --------------------------------------------------
@@ -234,9 +236,15 @@ class MQTTPublisher:
 
     def _on_connect(self, client: PahoClient, userdata, flags, reason_code, properties=None) -> None:
         self._connected = (reason_code == 0)
-        if self._connected:
-            # Drain buffer on every successful (re)connect
-            asyncio.get_event_loop().create_task(self._drain_buffer())
+        if self._connected and self._loop is not None:
+            # paho calls this from its network thread, which has no event
+            # loop.  Hand the drain back to the loop that owns the buffer.
+            self._loop.call_soon_threadsafe(self._schedule_drain)
+
+    def _schedule_drain(self) -> None:
+        """Run on the publisher's event loop, never on paho's thread."""
+        if self._drain_task is None or self._drain_task.done():
+            self._drain_task = asyncio.create_task(self._drain_buffer())
 
     def _on_disconnect(self, client, userdata, flags=None, reason_code=None, properties=None) -> None:
         self._connected = False

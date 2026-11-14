@@ -26,14 +26,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import time
 from datetime import datetime, timezone
 from typing import AsyncIterator, Optional
 
 from scapy.layers.dot11 import Dot11, Dot11Beacon, Dot11Elt
 from scapy.sendrecv import AsyncSniffer
 
-from rid_edge.odid_parser import frame_parser
 from rid_edge.odid_parser.constants import ODID_OUI
 
 from .base import Bearer, RawFrame, Receiver, ReceiverError, parse_mac

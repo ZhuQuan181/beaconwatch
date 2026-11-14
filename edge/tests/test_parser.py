@@ -12,7 +12,6 @@ from rid_edge.odid_parser.message_pack import (
     MessagePackParser,
     SubMessage,
     SubMessageType,
-    decode,
 )
 from rid_edge.pipeline import PipelineManager, observations_from_frame
 from rid_edge.receivers.base import Bearer, RawFrame

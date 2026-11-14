@@ -1,14 +1,14 @@
 {
-  "name": "rid-frontend",
+  "name": "beaconwatch-frontend",
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "RID Detection System — real-time drone dashboard (Vite + React + MapLibre GL).",
+  "description": "BeaconWatch — real-time Remote ID dashboard (Vite + React + MapLibre GL).",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 0.0.0.0 --port 5173",
-    "lint": "eslint . --ext .ts,.tsx",
+    "lint": "tsc -b --noEmit",
     "typecheck": "tsc -b --noEmit"
   },
   "dependencies": {

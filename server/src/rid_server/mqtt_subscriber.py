@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-from datetime import datetime
 from typing import Any
 
 import aiomqtt

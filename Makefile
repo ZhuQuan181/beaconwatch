@@ -9,7 +9,7 @@ SHELL := /bin/bash
 COMPOSE := docker compose -f server/docker-compose.yml
 
 help:
-	@echo "RID Detection System"
+	@echo "BeaconWatch — real-time Remote ID monitoring"
 	@echo "  make up     - start full stack (TimescaleDB + EMQX + Redis + server)"
 	@echo "  make down   - stop"
 	@echo "  make logs   - tail logs"
@@ -38,8 +38,8 @@ logs:
 
 install:
 	cd edge && uv pip install -e ".[dev]"
-	cd ../server && uv pip install -e ".[dev]"
-	cd ../frontend && npm install
+	cd server && uv pip install -e ".[dev]"
+	cd frontend && npm install
 
 test:
 	cd edge && .venv/bin/python -m pytest -q
@@ -63,9 +63,9 @@ e2e:
 	server/.venv/bin/python scripts/e2e_chain.py
 
 lint:
-	cd edge && .venv/bin/python -m ruff check . 2>/dev/null || true
-	cd ../server && .venv/bin/python -m ruff check . 2>/dev/null || true
-	cd ../frontend && npm run lint
+	cd edge && .venv/bin/python -m ruff check .
+	cd server && .venv/bin/python -m ruff check .
+	cd frontend && npm run lint
 
 clean:
 	$(COMPOSE) down -v

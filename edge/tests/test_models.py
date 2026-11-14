@@ -7,7 +7,6 @@ import pytest
 from pydantic import ValidationError
 
 from rid_edge.models import (
-    OperatorLocation,
     Position,
     Protocol,
     RidObservation,

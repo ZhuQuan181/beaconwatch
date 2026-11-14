@@ -15,10 +15,9 @@ from __future__ import annotations
 
 import logging
 import time
-from collections import defaultdict, deque
+from collections import deque
 from collections.abc import Iterator
 from threading import Lock
-from typing import Any
 
 from ..common.dedup import Deduper
 from ..models import RidObservation

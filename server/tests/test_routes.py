@@ -1,16 +1,11 @@
 """HTTP route tests via httpx.AsyncClient with ASGITransport."""
 from __future__ import annotations
 
-import json
-from datetime import datetime, timezone
 from typing import Any
 
 import httpx
-import pytest
-import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-import rid_server.db as db_mod
 from rid_server.app import create_app
 from rid_server.bus import ObservationBus
 from rid_server.mqtt_subscriber import MqttSubscriber
