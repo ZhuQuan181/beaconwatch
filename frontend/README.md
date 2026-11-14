@@ -17,6 +17,9 @@ npm run dev   # http://localhost:5173
 
 # Production build
 npm run build && npm run preview
+
+# Static demo build with in-browser mock data (no backend)
+VITE_MOCK=1 npm run build:mock
 ```
 
 The dev server expects the FastAPI server to be running on

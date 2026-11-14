@@ -2,7 +2,13 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
 export default defineConfig({
+  // Static demo build served from https://<user>.github.io/beaconwatch/
+  base: "/beaconwatch/",
   plugins: [react()],
+  build: {
+    outDir: "dist",
+    sourcemap: true,
+  },
   server: {
     host: "127.0.0.1",
     port: 5174,

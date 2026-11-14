@@ -18,4 +18,12 @@ import { App } from "./App";
 // hunts, we must (a) make useObservationsStream idempotent under
 // double-mount, and (b) make MapView's init effect handle the
 // double-init race.  Both are doable, just not free.
-ReactDOM.createRoot(document.getElementById("root")!).render(<App />);
+async function bootstrap() {
+  if (import.meta.env.VITE_MOCK === "1") {
+    const { installMockApi } = await import("./mock/install");
+    installMockApi();
+  }
+  ReactDOM.createRoot(document.getElementById("root")!).render(<App />);
+}
+
+void bootstrap();

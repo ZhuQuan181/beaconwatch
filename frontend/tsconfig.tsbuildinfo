@@ -1,1 +1,0 @@
-{"root":["./src/App.tsx","./src/main.tsx","./src/api/client.ts","./src/components/AlertPanel.tsx","./src/components/ConnectionBadge.tsx","./src/components/MapView.tsx","./src/components/ObservationList.tsx","./src/components/Timeline.tsx","./src/hooks/useObservationsStream.ts","./src/hooks/usePresence.ts","./src/types/index.ts","./vite.config.ts"],"version":"5.9.3"}

@@ -1,9 +1,21 @@
 # BeaconWatch
 
+[![CI](https://github.com/ZhuQuan181/beaconwatch/actions/workflows/ci.yml/badge.svg)](https://github.com/ZhuQuan181/beaconwatch/actions/workflows/ci.yml)
+[![Pages](https://github.com/ZhuQuan181/beaconwatch/actions/workflows/pages.yml/badge.svg)](https://github.com/ZhuQuan181/beaconwatch/actions/workflows/pages.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Live demo](https://img.shields.io/badge/demo-live-2ea44f)](https://ZhuQuan181.github.io/beaconwatch/)
+
 Real-time Remote ID (RID) monitoring for the airspace. BeaconWatch listens for
 ASTM F3411-22 / EN 4709-002 broadcasts over BLE 5.x and Wi-Fi NaN, aggregates
 them on a server, and visualises live drone traffic on a dark ATC-style
 dashboard.
+
+## Live Demo
+
+https://ZhuQuan181.github.io/beaconwatch/
+
+The demo is a static build with simulated drone traffic, so it runs without a
+backend. For the real system, run the stack locally with `make up`.
 
 ## Components
 

@@ -163,7 +163,7 @@ export function App() {
   return (
     <div className={`app ${isReplay ? "app--replay" : ""}`}>
       <header className="topbar">
-        <h1>🚁 RID Live Dashboard</h1>
+        <h1>🚁 BeaconWatch</h1>
         <span className="stat">
           <span className={`ws-dot ${connected ? "ws-online" : "ws-offline"}`} />
           WS {connected ? "online" : "offline"} · {total} msgs

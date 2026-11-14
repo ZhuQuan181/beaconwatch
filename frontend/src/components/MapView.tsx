@@ -144,6 +144,22 @@ function distMeters(a: [number, number], b: [number, number]): number {
   return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
 }
 
+/**
+ * Run `fn` once the map has created `sourceId`.
+ *
+ * `isStyleLoaded()` is not a good gate here: it flips false whenever
+ * sources are being updated, so a styledata-driven retry can starve
+ * forever.  The sources are created inside the map's `load` handler,
+ * which makes their existence the real readiness signal.
+ */
+function whenSourceReady(map: MlMap, sourceId: string, fn: () => void): void {
+  if (map.getSource(sourceId)) {
+    fn();
+    return;
+  }
+  map.once("load", fn);
+}
+
 /** One LineString per drone per *continuous* segment.
  *
  * Real tracks have gaps — the drone leaves radio range, the station
@@ -345,23 +361,6 @@ export function MapView({
           "line-opacity": 0.9,
         },
       });
-      // Zone names sit on the polygon so an operator can say "it's in
-      // the airport zone" without opening a panel.
-      map.addLayer({
-        id: "zones-label",
-        type: "symbol",
-        source: "zones",
-        layout: {
-          "text-field": ["get", "name"],
-          "text-size": 11,
-          "text-anchor": "top",
-        },
-        paint: {
-          "text-color": "#f0b429",
-          "text-halo-color": "#0b0d12",
-          "text-halo-width": 1.4,
-        },
-      });
 
       map.addSource("stations", {
         type: "geojson",
@@ -533,8 +532,7 @@ export function MapView({
       const cov = m.getSource("coverage") as GeoJSONSource | undefined;
       cov?.setData(coverageToGeoJSON(stations));
     };
-    if (m.isStyleLoaded()) apply();
-    else m.once("load", apply);
+    whenSourceReady(m, "stations", apply);
   }, [stations]);
 
   // Push geofence zones.  Separate from stations because zones change
@@ -546,8 +544,7 @@ export function MapView({
       const src = m.getSource("zones") as GeoJSONSource | undefined;
       src?.setData(zonesToGeoJSON(zones));
     };
-    if (m.isStyleLoaded()) apply();
-    else m.once("load", apply);
+    whenSourceReady(m, "zones", apply);
   }, [zones]);
 
   // Push observations + auto-fit on first.
@@ -600,12 +597,11 @@ export function MapView({
         // extend past the viewport and read as stray arcs instead of
         // circles.  One zoom level out and the deployment geometry
         // (which station covers which zone) is legible.
-        m.fitBounds(bounds, { padding: 70, duration: 800, maxZoom: 13 });
+        m.fitBounds(bounds, { padding: 70, duration: 0, maxZoom: 13 });
         fittedRef.current = true;
       }
     };
-    if (m.isStyleLoaded()) apply();
-    else m.once("load", apply);
+    whenSourceReady(m, "drones", apply);
   }, [observations, zones, stations]);
 
   // Push the selection ring.
@@ -634,8 +630,7 @@ export function MapView({
           : [],
       });
     };
-    if (m.isStyleLoaded()) apply();
-    else m.once("load", apply);
+    whenSourceReady(m, "selected", apply);
   }, [selectedDroneId, observations]);
 
   return <div ref={containerRef} className="map-container" />;
