@@ -10,12 +10,12 @@ import aiomqtt
 from pydantic import ValidationError
 from sqlalchemy import select
 
+from .alerts import AlertEngine, Zone
 from .config import Settings, get_settings
 from .db import GeofenceZone, get_session_factory
 from .logging_setup import get_logger
 from .models import DroneObservation
 from .repository import touch_station, write_observation
-from .alerts import AlertEngine, Zone
 
 log = get_logger(__name__)
 

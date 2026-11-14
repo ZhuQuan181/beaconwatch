@@ -14,7 +14,8 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db import Drone, Observation, Station
-from .models import DroneObservation, DroneSummary, Position, Station as StationModel
+from .models import DroneObservation, DroneSummary, Position
+from .models import Station as StationModel
 
 
 # ── Station ───────────────────────────────────────────────────────────

@@ -6,7 +6,6 @@ import time
 from datetime import datetime, timezone
 
 import pytest
-
 from rid_edge.models import Protocol
 from rid_edge.odid_parser.message_pack import (
     MessagePackParser,

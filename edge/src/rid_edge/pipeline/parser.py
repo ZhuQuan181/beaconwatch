@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime, timezone
 
+from ..common.geo import is_zero_coordinate
 from ..models import (
     Position,
     Protocol,
@@ -28,7 +29,6 @@ from ..odid_parser import basic_id as basic_id_mod
 from ..odid_parser import location as location_mod
 from ..odid_parser.message_pack import ParsedSubmessages
 from ..receivers.base import Bearer, RawFrame
-from ..common.geo import is_zero_coordinate
 
 
 def _drone_id_from_basic_id(b: basic_id_mod.BasicIDMessage) -> str:

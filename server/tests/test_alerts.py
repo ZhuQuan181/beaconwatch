@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import pytest
-
 from rid_server.alerts import AlertEngine, Zone, point_in_polygon
 
 # A 1 km-ish square around Nanshan, Shenzhen — the fixture zone.
@@ -213,11 +212,12 @@ async def test_ingest_fires_alert_after_persisting(db_engine, _sqlite_settings, 
     Rules run after the commit, so anything an operator sees in the alert
     panel can be traced back to an observation in the database.
     """
-    from rid_server.mqtt_subscriber import MqttSubscriber
-    from rid_server.repository import upsert_station, list_observations
-    from rid_server.models import Station as StationModel
-    from sqlalchemy.ext.asyncio import async_sessionmaker
     import json
+
+    from rid_server.models import Station as StationModel
+    from rid_server.mqtt_subscriber import MqttSubscriber
+    from rid_server.repository import list_observations, upsert_station
+    from sqlalchemy.ext.asyncio import async_sessionmaker
 
     # Seed a station so the FK is satisfied.
     factory = async_sessionmaker(db_engine, expire_on_commit=False)

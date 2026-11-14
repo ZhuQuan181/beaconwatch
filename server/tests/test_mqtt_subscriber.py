@@ -8,15 +8,13 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock
 
-from sqlalchemy.ext.asyncio import async_sessionmaker
-
+from conftest import make_obs
 from rid_server.mqtt_subscriber import MqttSubscriber
 from rid_server.repository import (
     list_drones,
     upsert_station,
 )
-
-from conftest import make_obs
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 
 async def test_extract_station_id_valid():
@@ -124,8 +122,8 @@ async def test_handle_message_topic_station_id_overrides_payload(
     assert sub.persisted == 1
 
     # The persisted row should be attributed to station-2
-    from sqlalchemy import select
     from rid_server.db import Observation
+    from sqlalchemy import select
     async with factory() as s:
         rows = (
             await s.execute(select(Observation))

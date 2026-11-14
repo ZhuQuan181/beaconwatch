@@ -6,12 +6,10 @@ import json
 
 import pytest
 import websockets
-
+from conftest import make_obs
 from rid_server.app import create_app
 from rid_server.bus import ObservationBus
 from rid_server.mqtt_subscriber import MqttSubscriber
-
-from conftest import make_obs
 
 
 async def test_websocket_receives_published_observation(

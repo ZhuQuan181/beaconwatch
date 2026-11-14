@@ -24,7 +24,6 @@ import enum
 from rid_edge.odid_parser import basic_id, location, self_id
 from rid_edge.odid_parser.constants import MsgType
 
-
 _SUBMESSAGE_SIZES: dict[int, int] = {
     MsgType.BASIC_ID: basic_id.BasicIDMessage.SIZE,
     MsgType.LOCATION: location.LocationMessage.SIZE,

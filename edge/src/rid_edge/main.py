@@ -18,14 +18,12 @@ import contextlib
 import signal
 import sys
 
-
 from rid_edge.common.config import get_settings
 from rid_edge.common.dedup import Deduper
 from rid_edge.common.logger import configure_logging, get_logger
 from rid_edge.mqtt_publisher import MQTTPublisher
 from rid_edge.pipeline.parser import observations_from_frame
 from rid_edge.receivers import BLEReceiver, Receiver, WifiReceiver
-
 
 log = get_logger(__name__)
 

@@ -1,8 +1,7 @@
 """Repository layer tests — exercises SQLAlchemy ORM directly."""
 from __future__ import annotations
 
-from sqlalchemy.ext.asyncio import AsyncSession
-
+from conftest import make_obs
 from rid_server.db import Drone
 from rid_server.models import DroneObservation, Position
 from rid_server.repository import (
@@ -13,8 +12,7 @@ from rid_server.repository import (
     upsert_station,
     write_observation,
 )
-
-from conftest import make_obs
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 def _obs_model(**kwargs) -> DroneObservation:
@@ -149,8 +147,9 @@ async def test_list_observations_filters_by_bbox(session: AsyncSession):
 
 
 async def test_list_drones_filters_by_recent(session: AsyncSession):
+    from datetime import datetime, timedelta, timezone
+
     from rid_server.models import Station as StationModel
-    from datetime import datetime, timezone, timedelta
     await upsert_station(
         session,
         StationModel(

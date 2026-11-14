@@ -4,14 +4,12 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
-from sqlalchemy.ext.asyncio import async_sessionmaker
-
+from conftest import make_obs
 from rid_server.app import create_app
 from rid_server.bus import ObservationBus
 from rid_server.mqtt_subscriber import MqttSubscriber
 from rid_server.repository import upsert_station, write_observation
-
-from conftest import make_obs
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 
 def _obs_dict(**kw) -> dict[str, Any]:
@@ -104,7 +102,8 @@ async def test_observation_round_trip(db_engine):
 
 
 async def test_observations_bounding_box_filter(db_engine):
-    from rid_server.models import DroneObservation, Position, Station as SM
+    from rid_server.models import DroneObservation, Position
+    from rid_server.models import Station as SM
     factory = async_sessionmaker(db_engine, expire_on_commit=False)
     async with factory() as s:
         await upsert_station(
@@ -150,7 +149,8 @@ async def test_observations_invalid_bbox_422(db_engine):
 
 # ── Drones ────────────────────────────────────────────────────────────
 async def test_get_drones(db_engine):
-    from rid_server.models import DroneObservation, Position, Station as SM
+    from rid_server.models import DroneObservation, Position
+    from rid_server.models import Station as SM
     factory = async_sessionmaker(db_engine, expire_on_commit=False)
     async with factory() as s:
         await upsert_station(
@@ -191,7 +191,8 @@ async def test_get_drone_by_id_404_when_missing(db_engine):
 # ── Timeline window + unidentified filter ─────────────────────────────
 async def _seed_three_observations(db_engine):
     """Three obs: two identified at different times, one never identifies."""
-    from rid_server.models import DroneObservation, Position, Station as SM
+    from rid_server.models import DroneObservation, Position
+    from rid_server.models import Station as SM
     factory = async_sessionmaker(db_engine, expire_on_commit=False)
     async with factory() as s:
         await upsert_station(

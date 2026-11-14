@@ -20,11 +20,9 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-
 from rid_edge.common.config import Settings
 from rid_edge.models import Position, Protocol, RidObservation
 from rid_edge.mqtt_publisher import MQTTPublisher, _OfflineBuffer
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

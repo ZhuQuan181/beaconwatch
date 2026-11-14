@@ -5,8 +5,7 @@ import asyncio
 import time
 
 import pytest
-
-from rid_edge.common import Deduper, new_ulid, exponential_backoff
+from rid_edge.common import Deduper, exponential_backoff, new_ulid
 from rid_edge.common.ulid import timestamp_from_ulid
 
 

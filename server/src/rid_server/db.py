@@ -36,6 +36,7 @@ from sqlalchemy.orm import (
     Mapped,
     mapped_column,
 )
+
 from .config import get_settings
 
 

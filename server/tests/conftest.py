@@ -13,22 +13,6 @@ from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from typing import Any
 
-import pytest
-import pytest_asyncio
-from sqlalchemy.ext.asyncio import (
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
-)
-
-import rid_server.db as db_mod
-from rid_server.app import create_app
-from rid_server.bus import ObservationBus
-from rid_server.config import Settings
-from rid_server.db import Base
-from rid_server.mqtt_subscriber import MqttSubscriber
-
-
 # ── Disable geoalchemy2 SQLite DDL hooks ────────────────────────────────
 # The library auto-registers a Table.after_create listener that calls
 # RecoverGeometryColumn() / CreateSpatialIndex() on every Geometry
@@ -37,6 +21,19 @@ from rid_server.mqtt_subscriber import MqttSubscriber
 # assertion convenience.  We monkey-patch the sqlite-side hooks to
 # no-ops, which keeps the listener signatures intact but harmless.
 import geoalchemy2.admin.dialects.sqlite as _ga_sqlite  # noqa: E402
+import pytest
+import pytest_asyncio
+import rid_server.db as db_mod
+from rid_server.app import create_app
+from rid_server.bus import ObservationBus
+from rid_server.config import Settings
+from rid_server.db import Base
+from rid_server.mqtt_subscriber import MqttSubscriber
+from sqlalchemy.ext.asyncio import (
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 _ga_sqlite.after_create = lambda *a, **kw: None
 _ga_sqlite.before_create = lambda *a, **kw: None

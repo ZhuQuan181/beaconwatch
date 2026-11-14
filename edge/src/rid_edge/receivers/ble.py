@@ -30,7 +30,6 @@ from bleak import BleakScanner
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 
-
 from .base import Bearer, RawFrame, Receiver, ReceiverError
 
 log = logging.getLogger(__name__)

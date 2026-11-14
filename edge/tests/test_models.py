@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 
 import pytest
 from pydantic import ValidationError
-
 from rid_edge.models import (
     Position,
     Protocol,
