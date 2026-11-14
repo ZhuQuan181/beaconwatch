@@ -198,6 +198,37 @@ async def test_publisher_loop_buffers_when_disconnected(settings: Settings) -> N
         await pub.stop()
 
 
+async def test_publisher_loop_buffers_when_qos1_is_not_acknowledged(
+    settings: Settings,
+) -> None:
+    pub = MQTTPublisher(settings)
+    try:
+        mock = _patch_client_connected(pub)
+        mock.publish.return_value.is_published.return_value = False
+        await pub.start()
+        await pub.publish(_make_obs("NOACK"))
+        for _ in range(40):
+            if pub.stats["buffered"] == 1:
+                break
+            await asyncio.sleep(0.05)
+        assert pub.stats["buffered"] == 1
+        assert pub.stats["sent"] == 0
+    finally:
+        await pub.stop()
+
+
+async def test_drain_buffer_keeps_row_when_ack_fails(settings: Settings) -> None:
+    pub = MQTTPublisher(settings)
+    try:
+        mock = _patch_client_connected(pub)
+        mock.publish.return_value.is_published.return_value = False
+        pub._buffer.push("rid/v1/s/obs", 1, b"unacked")
+        await pub._drain_buffer()
+        assert pub._buffer.size() == 1
+    finally:
+        await pub.stop()
+
+
 async def test_publish_does_not_raise_on_full_outbox(settings: Settings) -> None:
     pub = MQTTPublisher(settings)
     try:

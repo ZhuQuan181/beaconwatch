@@ -331,6 +331,8 @@ _KNOWN_PREFIXES: tuple[str, ...] = (
 
 
 def _row_to_observation(r) -> DroneObservation:
+    raw = r.raw or {}
+    raw_position = raw.get("position") or {}
     return DroneObservation(
         observation_id=r.observation_id,
         drone_id=r.drone_id,
@@ -342,12 +344,13 @@ def _row_to_observation(r) -> DroneObservation:
             lat=r.position_lat,
             lon=r.position_lon,
             alt_m=r.position_alt_m,
-            accuracy_h_m=0.0,
-            accuracy_v_m=0.0,
+            accuracy_h_m=float(raw_position.get("accuracy_h_m") or 0.0),
+            accuracy_v_m=float(raw_position.get("accuracy_v_m") or 0.0),
             speed_mps=r.speed_mps,
             heading_deg=r.heading_deg,
         ),
         drone_timestamp=r.drone_timestamp,
         received_at=r.received_at,
         self_id=r.self_id or "",
+        operator_location=raw.get("operator_location"),
     )

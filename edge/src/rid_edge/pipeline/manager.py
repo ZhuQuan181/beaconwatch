@@ -40,6 +40,9 @@ class PipelineManager:
     max_obs_per_sec
         Soft cap on observations emitted per second.  Excess is dropped
         (logged at DEBUG).
+    dedup_max_keys
+        Upper bound on the dedup cache so an unattended station cannot
+        grow it without limit.
     """
 
     def __init__(
@@ -48,11 +51,15 @@ class PipelineManager:
         station_id: str,
         dedup_window_s: float = 5.0,
         max_obs_per_sec: int = 50,
+        dedup_max_keys: int = 4096,
     ) -> None:
         if not station_id:
             raise ValueError("station_id is required")
         self.station_id = station_id
-        self.deduper = Deduper(window_s=dedup_window_s)
+        self.deduper = Deduper(
+            window_s=dedup_window_s,
+            max_keys=dedup_max_keys,
+        )
         self.max_obs_per_sec = max_obs_per_sec
 
         # Rate-limit bookkeeping

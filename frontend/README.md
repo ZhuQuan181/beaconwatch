@@ -4,8 +4,8 @@ Live drone-detection dashboard for BeaconWatch.
 
 ## Stack
 
-- **Vite 5** + **React 18** + **TypeScript 5** (strict)
-- **MapLibre GL JS 4** (no API key — uses `demotiles.maplibre.org` style)
+- **Vite 8** + **React 18** + **TypeScript 5** (strict)
+- **MapLibre GL JS 6** (no API key — uses an Esri dark raster basemap)
 - Native `WebSocket` for the live observation feed
 
 ## Run
@@ -17,6 +17,9 @@ npm run dev   # http://localhost:5173
 
 # Production build
 npm run build && npm run preview
+
+# Security + production bundle check
+npm audit --omit=dev
 
 # Static demo build with in-browser mock data (no backend)
 VITE_MOCK=1 npm run build:mock
@@ -42,3 +45,6 @@ src/
     ├── ObservationList.tsx        # Live list (one row per drone)
     └── ConnectionBadge.tsx        # Server health pill
 ```
+
+The history/unidentified refresh is throttled inside `App.tsx`, so a busy live
+stream does not issue a REST request for every WebSocket frame.

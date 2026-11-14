@@ -1,5 +1,9 @@
 # 无人机 RID 检测系统实现计划
 
+> **历史设计稿，非当前实现说明。** 文中 Redis、PostGIS、JWT、mTLS、ACL 和
+> `deploy/` 文件属于早期规划；当前真实能力与限制以
+> `docs/01-architecture.md` 为准。
+
 > **For Hermes:** Use subagent-driven-development skill to implement this plan task-by-task.
 
 **Goal:** 构建端到端无人机 Remote ID (RID) 检测系统: 边缘工控机接收+解析+MQTT上报, 服务器端汇总+存储+实时展示。

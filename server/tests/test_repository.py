@@ -23,18 +23,21 @@ def _obs_model(**kwargs) -> DroneObservation:
     return DroneObservation.model_validate(raw)
 
 
-async def test_upsert_station_inserts_then_no_ops(session: AsyncSession):
+async def test_upsert_station_inserts_then_updates(session: AsyncSession):
     from rid_server.models import Station as StationModel
     s = StationModel(
         station_id="S-1", name="Pier 1", lat=37.81, lon=-122.41,
         alt_m=10.0, firmware_version="1.0.0", last_seen=None, online=True,
     )
     await upsert_station(session, s)
-    # Insert again — should not raise / duplicate
+    s.name = "Pier 1 (updated)"
+    s.lat = 37.82
     await upsert_station(session, s)
     rows = await list_stations(session)
     assert len(rows) == 1
     assert rows[0].station_id == "S-1"
+    assert rows[0].name == "Pier 1 (updated)"
+    assert rows[0].lat == 37.82
 
 
 async def test_touch_station_updates_last_seen(session: AsyncSession):

@@ -74,7 +74,7 @@ class _OfflineBuffer:
         )
 
     def push(self, topic: str, qos: int, payload: bytes) -> None:
-        if len(payload) > self._max_bytes:
+        if len(topic.encode("utf-8")) + len(payload) > self._max_bytes:
             return  # drop oversized, not worth blocking on
         self._conn.execute(
             "INSERT INTO pending(topic, qos, payload, ts) VALUES (?, ?, ?, ?)",
@@ -83,16 +83,30 @@ class _OfflineBuffer:
         self._enforce_cap()
 
     def _enforce_cap(self) -> None:
-        size = self._path.stat().st_size
-        if size <= self._max_bytes:
-            return
-        # Evict oldest 25 % to avoid one-row-at-a-time churn.
-        self._conn.execute(
-            "DELETE FROM pending WHERE seq IN ("
-            "  SELECT seq FROM pending ORDER BY seq ASC LIMIT MAX(1, "
-            "  (SELECT CAST(COUNT(*) * 0.25 AS INTEGER) FROM pending))"
-            ")"
-        )
+        while True:
+            size = self._pending_bytes()
+            if size <= self._max_bytes:
+                return
+            count = int(
+                self._conn.execute("SELECT COUNT(*) FROM pending").fetchone()[0]
+            )
+            if count == 0:
+                return
+            # Evict the oldest quarter (at least one) to avoid churn.
+            n = max(1, count // 4)
+            self._conn.execute(
+                "DELETE FROM pending WHERE seq IN ("
+                "  SELECT seq FROM pending ORDER BY seq ASC LIMIT ?"
+                ")",
+                (n,),
+            )
+
+    def _pending_bytes(self) -> int:
+        row = self._conn.execute(
+            "SELECT COALESCE(SUM(LENGTH(topic) + LENGTH(payload)), 0) "
+            "FROM pending"
+        ).fetchone()
+        return int(row[0])
 
     def drain_batch(self, limit: int = 200) -> list[tuple[int, str, int, bytes]]:
         cur = self._conn.execute(
@@ -207,10 +221,22 @@ class MQTTPublisher:
 
     async def publish(self, obs: RidObservation) -> None:
         """Queue an observation for publish.  Never raises."""
-        topic = self._settings.topic_obs
-        payload = obs.to_mqtt_payload().encode("utf-8")
+        await self.publish_message(
+            self._settings.topic_obs,
+            obs.to_mqtt_payload().encode("utf-8"),
+        )
+
+    async def publish_message(
+        self,
+        topic: str,
+        payload: bytes,
+        *,
+        qos: int | None = None,
+    ) -> None:
+        """Queue any wire message through the same durable outbox."""
+        qos = self._settings.mqtt_qos if qos is None else int(qos)
         try:
-            self._outbox.put_nowait((topic, self._settings.mqtt_qos, payload))
+            self._outbox.put_nowait((topic, qos, payload))
         except asyncio.QueueFull:
             self._dropped += 1
 
@@ -265,16 +291,10 @@ class MQTTPublisher:
                 continue
 
             try:
-                info = self._client.publish(topic, payload, qos=qos)
-                # paho is fire-and-forget; we trust QoS 1 acks via
-                # the on_publish callback (optional).  We just give it
-                # a moment to actually flush.
-                await asyncio.sleep(0)
-                if info.is_published() is False and info.rc != 0:
-                    # Back to disk
-                    self._buffer.push(topic, qos, payload)
-                else:
+                if await self._publish_and_wait(topic, payload, qos):
                     self._sent += 1
+                else:
+                    self._buffer.push(topic, qos, payload)
             except Exception:
                 self._buffer.push(topic, qos, payload)
 
@@ -287,14 +307,33 @@ class MQTTPublisher:
                 return
             for seq, topic, qos, payload in rows:
                 try:
-                    self._client.publish(topic, payload, qos=qos)
-                    self._sent += 1
-                    self._buffer.delete(seq)
+                    if await self._publish_and_wait(topic, payload, qos):
+                        self._sent += 1
+                        self._buffer.delete(seq)
+                    else:
+                        return
                 except Exception:
                     # Stay connected but stop draining; we'll retry.
                     return
             # Yield so the event loop can serve other tasks
             await asyncio.sleep(0)
+
+    async def _publish_and_wait(self, topic: str, payload: bytes, qos: int) -> bool:
+        """Publish and, for QoS 1/2, wait for the broker acknowledgement."""
+        info = self._client.publish(topic, payload, qos=qos)
+        if getattr(info, "rc", 0) != 0:
+            return False
+        if qos == 0:
+            return True
+        try:
+            await asyncio.to_thread(
+                info.wait_for_publish,
+                int(self._settings.mqtt_ack_timeout_s),
+            )
+        except Exception:
+            return False
+        is_published = getattr(info, "is_published", None)
+        return not callable(is_published) or bool(is_published())
 
     @property
     def stats(self) -> dict[str, int]:

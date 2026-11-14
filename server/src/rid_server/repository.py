@@ -20,12 +20,7 @@ from .models import Station as StationModel
 
 # ── Station ───────────────────────────────────────────────────────────
 async def upsert_station(session: AsyncSession, station: StationModel) -> None:
-    """Insert a station, or no-op if it already exists.
-
-    We never *overwrite* lat/lon from the wire — those are physical
-    coordinates set at deployment time.  Only ``last_seen`` and
-    ``online`` are refreshed.
-    """
+    """Insert or refresh a station from a trusted heartbeat."""
     stmt = (
         pg_insert(Station)
         .values(
@@ -38,7 +33,18 @@ async def upsert_station(session: AsyncSession, station: StationModel) -> None:
             last_seen=station.last_seen or datetime.now(tz=timezone.utc),
             online=station.online,
         )
-        .on_conflict_do_nothing(index_elements=["station_id"])
+        .on_conflict_do_update(
+            index_elements=["station_id"],
+            set_=dict(
+                name=station.name,
+                lat=station.lat,
+                lon=station.lon,
+                alt_m=station.alt_m,
+                firmware_version=station.firmware_version,
+                last_seen=station.last_seen or datetime.now(tz=timezone.utc),
+                online=station.online,
+            ),
+        )
     )
     await session.execute(stmt)
     await session.commit()

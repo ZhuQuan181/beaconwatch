@@ -1,55 +1,45 @@
-"""Open Drone ID (ASTM F3411) constants.
+"""Open Drone ID (ASTM F3411 / ASD-STAN EN 4709-002) constants.
 
-ODID uses a packed binary format inside Wi-Fi vendor-specific IEs and
-BLE AD structures. Each message has a 1-byte MessageType followed by
-a type-specific payload. The full reference is the
-"Open Drone ID Message Marshalling Specification" (published 2021-04-06).
-
-All values here are taken directly from that spec.
+The wire format is defined by the Open Drone ID message marshalling
+specification.  Every encoded message is exactly 25 bytes.  A Message
+Pack has a three-byte header followed by ``MsgPackSize`` 25-byte
+messages; it is not a length-prefixed byte stream.
 """
 from __future__ import annotations
 
 from enum import IntEnum
 
-# -----------------------------------------------------------------------
-# Wi-Fi vendor IE OUI
-# -----------------------------------------------------------------------
-# This 3-byte OUI identifies a vendor-specific information element that
-# contains ODID messages. (Also used as the "manufacturer" in some IEs.)
-ODID_OUI: bytes = b"\xFA\x0B\xBC"
-
-# The 802.11 element ID for "vendor specific" is 221 (0xDD).
+# Wi-Fi vendor-specific element.
 WLAN_EID_VENDOR_SPECIFIC: int = 0xDD
+ODID_OUI: bytes = b"\xFA\x0B\xBC"
+ODID_OUI_TYPE: int = 0x0D
 
+# NAN service discovery (Wi-Fi Alliance public action frame).
+WIFI_ALLIANCE_OUI: bytes = b"\x50\x6F\x9A"
+NAN_OUI_TYPE: int = 0x13
+NAN_SERVICE_ID: bytes = b"\x88\x69\x19\x9D\x92\x09"
+NAN_SERVICE_DESCRIPTOR_ATTRIBUTE: int = 0x03
 
-# -----------------------------------------------------------------------
-# BLE AD structure
-# -----------------------------------------------------------------------
-# AD type 0x16 = Service Data (16-bit UUID), used as the "envelope" for
-# BLE4 legacy advertisements. The 16-bit UUID 0xFFFA was reserved by
-# the Bluetooth SIG for Open Drone ID. BLE5 extended advertisements
-# use AD type 0x07 (Complete List of 128-bit Service UUIDs) etc., but
-# almost all real drones use 0x16 + 0xFFFA.
+# BLE legacy advertising service data.
 BLE_AD_TYPE_SERVICE_DATA_16: int = 0x16
 BLE_ODID_SERVICE_UUID_16: int = 0xFFFA
 
+MESSAGE_SIZE: int = 25
+MESSAGE_PACK_HEADER_SIZE: int = 3
+MAX_MESSAGES_PER_PACK: int = 9
+PROTOCOL_VERSION: int = 2
 
-# -----------------------------------------------------------------------
-# Message types
-# -----------------------------------------------------------------------
+
 class MsgType(IntEnum):
     BASIC_ID = 0x0
     LOCATION = 0x1
-    AUTH = 0x2  # optional, deprecated by spec, we still decode
+    AUTH = 0x2
     SELF_ID = 0x3
     SYSTEM = 0x4
     OPERATOR_ID = 0x5
     MESSAGE_PACK = 0xF
 
 
-# -----------------------------------------------------------------------
-# Basic ID: UA type (4 bits)
-# -----------------------------------------------------------------------
 class UAType(IntEnum):
     NONE = 0
     AEROPLANE = 1
@@ -73,20 +63,14 @@ class UAType(IntEnum):
         return self.name.replace("_", " ").title()
 
 
-# -----------------------------------------------------------------------
-# Basic ID: ID type (3 bits)
-# -----------------------------------------------------------------------
 class IDType(IntEnum):
     NONE = 0
-    SERIAL_NUMBER = 1          # manufacturer's serial
-    CAA_REGISTRATION_ID = 2    # e.g. FAA Part 107 registration
+    SERIAL_NUMBER = 1
+    CAA_REGISTRATION_ID = 2
     UTM_ASSIGNED_UUID = 3
-    SPECIFIC_SESSION_ID = 4    # 20-byte session ID
+    SPECIFIC_SESSION_ID = 4
 
 
-# -----------------------------------------------------------------------
-# Location: Status (3 bits)
-# -----------------------------------------------------------------------
 class LSStatus(IntEnum):
     UNDECLARED = 0
     GROUND = 1
@@ -95,79 +79,143 @@ class LSStatus(IntEnum):
     REMOTE_ID_SYSTEM_FAILURE = 4
 
 
-# -----------------------------------------------------------------------
-# Location: Type flags
-# -----------------------------------------------------------------------
-class LSType(IntEnum):
-    INVALID_OR_RESERVED = 0
-    TAKEOFF = 1
-    LANDING = 2
-    POINT_TO_POINT = 3
-    WAVEAROUND = 4
-    HOVER = 5            # 2D
-    HOVER_GROUND = 6
-    HOVER_AIRBORNE = 7
-    OTHER = 8
+class HeightReference(IntEnum):
+    OVER_TAKEOFF = 0
+    OVER_GROUND = 1
 
 
-# -----------------------------------------------------------------------
-# Location: Speed/Vertical accuracy (4 bits, packed)
-# -----------------------------------------------------------------------
-# Multiplier: 0.1 m/s for horizontal, 0.1 m/s for vertical (per the
-# horizontal_speed_accuracy table). The exact table is documented in
-# the spec; we just expose the value as a float and let the caller
-# scale.
-
-
-# -----------------------------------------------------------------------
-# Self-ID: Description type (8 bits)
-# -----------------------------------------------------------------------
 class SelfIDType(IntEnum):
     TEXT = 0
     EMERGENCY = 1
     EXTENDED_STATUS = 2
-    # 3-200 reserved
-    # 201-255 vendor-specific
 
 
-# -----------------------------------------------------------------------
-# System: Classification (3 bits)
-# -----------------------------------------------------------------------
-class SysClassification(IntEnum):
+class OperatorLocationType(IntEnum):
+    TAKEOFF = 0
+    LIVE_GNSS = 1
+    FIXED = 2
+
+
+class ClassificationType(IntEnum):
     UNDECLARED = 0
-    EU_C0 = 1   # Open category subcategory A
-    EU_C1 = 2
-    EU_C2 = 3
-    EU_C3 = 4
-    EU_C4 = 5
-    EU_C5 = 6
-    EU_C6 = 7
+    EU = 1
 
 
-# -----------------------------------------------------------------------
-# Geometry scale: encoded as int8, scale = (value & 0x0F) - 9
-# gives the exponent such that meters = value * 10^(scale - 4)
-# -----------------------------------------------------------------------
-def decode_geo(encoded: int) -> float:
-    """Decode a 4-bit signed-4bit-exponent geometry value (Location msg).
+class EUCategory(IntEnum):
+    UNDECLARED = 0
+    OPEN = 1
+    SPECIFIC = 2
+    CERTIFIED = 3
 
-    Encoding per ASTM F3411-22 §A.2.4.4:
-        encoded = ((mantissa & 0x0F) << 4) | (exponent & 0x0F)
-    Resolution = 0.1 m. Range scales by exponent.
-    We return the value in meters as a float, or NaN for "invalid".
 
-    For our purposes we keep this simplified to a reasonable approximation;
-    full decoding is in `odid_parser/location.py`.
+class EUClass(IntEnum):
+    UNDECLARED = 0
+    CLASS_0 = 1
+    CLASS_1 = 2
+    CLASS_2 = 3
+    CLASS_3 = 4
+    CLASS_4 = 5
+    CLASS_5 = 6
+    CLASS_6 = 7
+
+
+# Accuracy tables from the Open Drone ID C implementation.  Unknown /
+# reserved values decode to the spec's conservative "worst case" value.
+HORIZONTAL_ACCURACY_M: tuple[float, ...] = (
+    18520.0,
+    18520.0,
+    7808.0,
+    3704.0,
+    1852.0,
+    926.0,
+    555.6,
+    185.2,
+    92.6,
+    30.0,
+    10.0,
+    3.0,
+    1.0,
+    18520.0,
+    18520.0,
+    18520.0,
+)
+
+VERTICAL_ACCURACY_M: tuple[float, ...] = (
+    150.0,
+    150.0,
+    45.0,
+    25.0,
+    10.0,
+    3.0,
+    1.0,
+    150.0,
+    150.0,
+    150.0,
+    150.0,
+    150.0,
+    150.0,
+    150.0,
+    150.0,
+    150.0,
+)
+
+SPEED_ACCURACY_MPS: tuple[float, ...] = (
+    10.0,
+    10.0,
+    3.0,
+    1.0,
+    0.3,
+    10.0,
+    10.0,
+    10.0,
+    10.0,
+    10.0,
+    10.0,
+    10.0,
+    10.0,
+    10.0,
+    10.0,
+    10.0,
+)
+
+TIMESTAMP_ACCURACY_S: tuple[float, ...] = tuple(i / 10.0 for i in range(16))
+
+
+def decode_geo(_: int) -> float:
+    """Deprecated compatibility shim.
+
+    The old parser exposed a stub with this name.  Location decoding now
+    lives in :mod:`rid_edge.odid_parser.location`.
     """
-    # Stub: real implementation lives in location.py
-    raise NotImplementedError
+    raise NotImplementedError("decode_geo is no longer part of the wire format")
 
 
-# -----------------------------------------------------------------------
-# Operator ID: Operator Location type
-# -----------------------------------------------------------------------
-class OpLocType(IntEnum):
-    INVALID = 0
-    TAKEOFF = 1
-    DYNAMIC = 2
-    FIXED = 3
+__all__ = [
+    "BLE_AD_TYPE_SERVICE_DATA_16",
+    "BLE_ODID_SERVICE_UUID_16",
+    "ClassificationType",
+    "EUCategory",
+    "EUClass",
+    "HORIZONTAL_ACCURACY_M",
+    "HeightReference",
+    "IDType",
+    "LSStatus",
+    "MAX_MESSAGES_PER_PACK",
+    "MESSAGE_PACK_HEADER_SIZE",
+    "MESSAGE_SIZE",
+    "MsgType",
+    "NAN_OUI_TYPE",
+    "NAN_SERVICE_DESCRIPTOR_ATTRIBUTE",
+    "NAN_SERVICE_ID",
+    "ODID_OUI",
+    "ODID_OUI_TYPE",
+    "OperatorLocationType",
+    "PROTOCOL_VERSION",
+    "SPEED_ACCURACY_MPS",
+    "SelfIDType",
+    "TIMESTAMP_ACCURACY_S",
+    "UAType",
+    "VERTICAL_ACCURACY_M",
+    "WIFI_ALLIANCE_OUI",
+    "WLAN_EID_VENDOR_SPECIFIC",
+]

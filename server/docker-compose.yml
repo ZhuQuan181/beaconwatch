@@ -37,18 +37,6 @@ services:
       timeout: 5s
       retries: 20
 
-  redis:
-    image: redis:7-alpine
-    container_name: rid-redis
-    restart: unless-stopped
-    ports:
-      - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
   rid-server:
     build: .
     container_name: rid-server
@@ -66,13 +54,25 @@ services:
       RID_DB_PASSWORD: rid_dev_password
       RID_MQTT_HOST: emqx
       RID_MQTT_PORT: 1883
-      RID_REDIS_HOST: redis
-      RID_REDIS_PORT: 6379
+      RID_MQTT_OBS_TOPIC: rid/v1/+/obs
+      RID_MQTT_INFO_TOPIC: rid/v1/+/info
       RID_HTTP_HOST: 0.0.0.0
       RID_HTTP_PORT: 8000
     ports:
       - "8000:8000"
     command: ["uvicorn", "rid_server.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
 
 volumes:
   rid_pgdata: {}

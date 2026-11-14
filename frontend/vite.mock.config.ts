@@ -8,6 +8,15 @@ export default defineConfig({
   build: {
     outDir: "dist",
     sourcemap: true,
+    chunkSizeWarningLimit: 1200,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes("maplibre-gl")) return "maplibre";
+          return undefined;
+        },
+      },
+    },
   },
   server: {
     host: "127.0.0.1",

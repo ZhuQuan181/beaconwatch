@@ -19,10 +19,9 @@ import signal
 import sys
 
 from rid_edge.common.config import get_settings
-from rid_edge.common.dedup import Deduper
 from rid_edge.common.logger import configure_logging, get_logger
 from rid_edge.mqtt_publisher import MQTTPublisher
-from rid_edge.pipeline.parser import observations_from_frame
+from rid_edge.pipeline import PipelineManager
 from rid_edge.receivers import BLEReceiver, Receiver, WifiReceiver
 
 log = get_logger(__name__)
@@ -48,25 +47,15 @@ async def _run_receiver(
 
 
 async def _run_parser(
-    station_id: str,
+    pipeline: PipelineManager,
     in_queue: asyncio.Queue,
     out_queue: asyncio.Queue,
-    dedup: Deduper,
 ) -> None:
-    """Parse RawFrames into RidObservations and apply dedup."""
+    """Parse RawFrames through the shared dedup/rate-limited pipeline."""
     while True:
         frame = await in_queue.get()
         try:
-            for obs in observations_from_frame(frame):
-                # Stamp station id
-                obs = obs.model_copy(update={"station_id": station_id})
-                # Dedup: only forward if it's the first within window
-                is_dup = dedup.seen(
-                    (obs.station_id, obs.drone_id, obs.protocol.value),
-                    obs.observation_id,
-                )
-                if is_dup:
-                    continue
+            for obs in pipeline.process(frame):
                 await out_queue.put(obs)
         except Exception as exc:
             log.exception("parser_error", error=str(exc))
@@ -101,11 +90,7 @@ async def _run_heartbeat(
     while True:
         try:
             payload = info.model_dump_json().encode("utf-8")
-            # publish to topic_info using the same outbox as obs
-            # (we use the publisher's internal outbox by calling publish_observation?)
-            # For simplicity we just use the paho client directly.
-            if publisher._connected:
-                publisher._client.publish(settings.topic_info, payload, qos=1)
+            await publisher.publish_message(settings.topic_info, payload)
         except Exception as exc:
             log.warning("heartbeat_failed", error=str(exc))
         await asyncio.sleep(settings.info_interval_s)
@@ -125,7 +110,12 @@ async def main() -> int:
     # ---- queues ---------------------------------------------------
     frame_queue: asyncio.Queue = asyncio.Queue(maxsize=4096)
     obs_queue: asyncio.Queue = asyncio.Queue(maxsize=4096)
-    dedup = Deduper(window_s=settings.dedup_window_s, max_keys=settings.dedup_max_keys)
+    pipeline = PipelineManager(
+        station_id=settings.station_id,
+        dedup_window_s=settings.dedup_window_s,
+        max_obs_per_sec=settings.max_obs_per_sec,
+        dedup_max_keys=settings.dedup_max_keys,
+    )
 
     # ---- receivers -----------------------------------------------
     receivers: list[tuple[str, Receiver]] = []
@@ -154,7 +144,10 @@ async def main() -> int:
 
     tasks = [
         asyncio.create_task(_run_heartbeat(publisher, settings), name="heartbeat"),
-        asyncio.create_task(_run_parser(settings.station_id, frame_queue, obs_queue, dedup), name="parser"),
+        asyncio.create_task(
+            _run_parser(pipeline, frame_queue, obs_queue),
+            name="parser",
+        ),
         asyncio.create_task(_run_publisher(publisher, obs_queue), name="publisher"),
     ]
     for name, rx in receivers:

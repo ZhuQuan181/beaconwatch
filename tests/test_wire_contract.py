@@ -28,6 +28,7 @@ for pkg in ("edge/src", "server/src"):
     if p not in sys.path:
         sys.path.insert(0, p)
 
+from rid_edge.models import OperatorLocation as EdgeOperatorLocation  # noqa: E402
 from rid_edge.models import Position as EdgePosition  # noqa: E402
 from rid_edge.models import Protocol as EdgeProtocol  # noqa: E402
 from rid_edge.models import RidObservation  # noqa: E402
@@ -53,6 +54,11 @@ def _edge_observation(**overrides) -> RidObservation:
         drone_timestamp=datetime(2026, 11, 14, 10, 0, 0, tzinfo=timezone.utc),
         received_at=datetime(2026, 11, 14, 10, 0, 1, tzinfo=timezone.utc),
         self_id="survey mission",
+        operator_location=EdgeOperatorLocation(
+            lat=22.5410,
+            lon=113.9340,
+            alt_m=8.0,
+        ),
     )
     base.update(overrides)
     return RidObservation(**base)
@@ -78,6 +84,10 @@ def test_edge_payload_is_accepted_by_server():
     assert obs.position.alt_m == pytest.approx(120.0)
     assert obs.position.speed_mps == pytest.approx(15.5)
     assert obs.position.heading_deg == pytest.approx(90.0)
+    assert obs.operator_location is not None
+    assert obs.operator_location.lat == pytest.approx(22.5410)
+    assert obs.operator_location.lon == pytest.approx(113.9340)
+    assert obs.operator_location.alt_m == pytest.approx(8.0)
 
 
 def test_rssi_survives_the_hop():
@@ -98,7 +108,11 @@ def test_every_position_field_is_wire_compatible():
 
 @pytest.mark.parametrize(
     "protocol",
-    [EdgeProtocol.ASTM_F3411, EdgeProtocol.WIFI_NAN],
+    [
+        EdgeProtocol.ASTM_F3411,
+        EdgeProtocol.WIFI_NAN,
+        EdgeProtocol.WIFI_BEACON,
+    ],
 )
 def test_both_protocols_are_valid_server_literals(protocol):
     """Server types `protocol` as a Literal; edge uses an enum.

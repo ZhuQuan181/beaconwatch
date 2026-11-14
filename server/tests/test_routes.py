@@ -28,6 +28,40 @@ async def test_health_ok(db_engine):
     assert r.json() == {"status": "ok"}
 
 
+async def test_health_live_and_ready(db_engine):
+    app = create_app()
+    app.state.bus = ObservationBus()
+    app.state.subscriber = MqttSubscriber(_settings())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        live = await c.get("/health/live")
+        ready = await c.get("/health/ready")
+        healthz = await c.get("/healthz")
+    assert live.status_code == 200
+    assert ready.status_code == 200
+    readiness = ready.json()
+    assert readiness["status"] == "ready"
+    assert healthz.status_code == 200
+
+
+async def test_metrics_exposes_ingest_counters(db_engine):
+    app = create_app()
+    app.state.bus = ObservationBus()
+    subscriber = MqttSubscriber(_settings())
+    subscriber.received = 7
+    subscriber.persisted = 6
+    subscriber.invalid = 1
+    subscriber.station_infos = 2
+    app.state.subscriber = subscriber
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        r = await c.get("/metrics")
+    assert r.status_code == 200
+    assert "rid_mqtt_received_total 7" in r.text
+    assert "rid_mqtt_persisted_total 6" in r.text
+    assert "rid_station_info_total 2" in r.text
+
+
 def _settings():
     from rid_server import config
     return config.get_settings()
@@ -84,6 +118,11 @@ async def test_observation_round_trip(db_engine):
     from rid_server.models import DroneObservation, Position
     raw = _obs_dict(drone_id="D-1", station_id="st-1")
     raw["position"] = Position(**raw["position"])
+    raw["operator_location"] = {
+        "lat": 37.775,
+        "lon": -122.42,
+        "alt_m": 12.0,
+    }
     obs = DroneObservation.model_validate(raw)
     async with factory() as s:
         await write_observation(s, obs)
@@ -99,6 +138,10 @@ async def test_observation_round_trip(db_engine):
     assert len(data) == 1
     assert data[0]["drone_id"] == "D-1"
     assert data[0]["position"]["lat"] == 37.7749
+    assert data[0]["position"]["accuracy_h_m"] == 5.0
+    assert data[0]["position"]["accuracy_v_m"] == 8.0
+    assert data[0]["operator_location"]["lat"] == 37.775
+    assert data[0]["operator_location"]["alt_m"] == 12.0
 
 
 async def test_observations_bounding_box_filter(db_engine):

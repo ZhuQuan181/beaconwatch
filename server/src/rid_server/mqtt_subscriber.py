@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+from datetime import datetime, timezone
 from typing import Any
 
 import aiomqtt
@@ -14,8 +15,9 @@ from .alerts import AlertEngine, Zone
 from .config import Settings, get_settings
 from .db import GeofenceZone, get_session_factory
 from .logging_setup import get_logger
-from .models import DroneObservation
-from .repository import touch_station, write_observation
+from .models import DroneObservation, StationInfo
+from .models import Station as StationModel
+from .repository import touch_station, upsert_station, write_observation
 
 log = get_logger(__name__)
 
@@ -52,8 +54,10 @@ class MqttSubscriber:
         # Operational counters
         self.received = 0
         self.persisted = 0
+        self.station_infos = 0
         self.invalid = 0
         self.reconnects = 0
+        self.connected = False
 
     # ── Lifecycle ─────────────────────────────────────────────────
     async def start(self) -> None:
@@ -91,10 +95,16 @@ class MqttSubscriber:
                         self._settings.mqtt_obs_topic,
                         qos=self._settings.mqtt_qos,
                     )
+                    await client.subscribe(
+                        self._settings.mqtt_info_topic,
+                        qos=self._settings.mqtt_qos,
+                    )
                     log.info(
                         "mqtt.subscribed",
-                        topic=self._settings.mqtt_obs_topic,
+                        obs_topic=self._settings.mqtt_obs_topic,
+                        info_topic=self._settings.mqtt_info_topic,
                     )
+                    self.connected = True
                     backoff = 1.0  # reset on successful connect
                     async for message in client.messages:
                         if self._stop.is_set():
@@ -103,6 +113,7 @@ class MqttSubscriber:
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # broker down, network blip, etc.
+                self.connected = False
                 self.reconnects += 1
                 log.warning(
                     "mqtt.disconnected",
@@ -121,7 +132,13 @@ class MqttSubscriber:
         Public so it can be unit-tested without a broker.
         """
         self.received += 1
-        station_id = self._extract_station_id(str(topic))
+        topic_str = str(topic)
+        topic_parts = topic_str.split("/")
+        if len(topic_parts) == 4 and topic_parts[3] == "info":
+            await self._handle_station_info(topic_str, payload)
+            return
+
+        station_id = self._extract_station_id(topic_str)
         try:
             data = json.loads(payload)
             # Normalize protocol casing
@@ -174,6 +191,33 @@ class MqttSubscriber:
             drone_id=obs.drone_id,
             station_id=obs.station_id,
         )
+
+    async def _handle_station_info(self, topic: str, payload: bytes) -> None:
+        try:
+            data = json.loads(payload)
+            info = StationInfo.model_validate(data)
+        except (json.JSONDecodeError, ValidationError) as exc:
+            self.invalid += 1
+            log.warning("mqtt.invalid_info", topic=topic, error=str(exc)[:200])
+            return
+
+        topic_station = self._extract_station_id(topic)
+        station_id = topic_station or info.station_id
+        station = StationModel(
+            station_id=station_id,
+            name=info.name or station_id,
+            lat=info.location.lat,
+            lon=info.location.lon,
+            alt_m=info.location.alt_m,
+            firmware_version=info.firmware_version,
+            last_seen=datetime.now(tz=timezone.utc),
+            online=True,
+        )
+        factory = get_session_factory()
+        async with factory() as session:
+            await upsert_station(session, station)
+        self.station_infos += 1
+        log.info("station.info", station_id=station_id)
 
     async def _load_zones(self) -> list[Zone]:
         """Zones, cached for 30 s.

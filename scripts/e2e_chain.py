@@ -1,180 +1,223 @@
-"""End-to-end chain check: edge → MQTT → server → DB → HTTP.
+"""End-to-end chain check using real OpenDroneID golden vectors.
 
-This is the script `make e2e` should have been running.  It does NOT
-mock anything: real aiomqtt publish, real EMQX broker, real
-MqttSubscriber, real Postgres insert, real FastAPI route.
+The identified drone starts as a complete official 802.11 Beacon frame;
+the unidentified drone starts as a standards-compliant Message Pack made
+from official sub-messages.  Both then traverse the real receiver /
+parser / MQTT / database / HTTP path:
 
-Steps and what each one proves:
-  1. edge builds a RidObservation and serialises it     — edge is importable
-  2. publish to rid/v1/<station>/obs over EMQX          — broker reachable
-  3. server subscriber parses it                        — WIRE CONTRACT holds
-  4. row lands in Postgres                              — persistence works
-  5. GET /observations returns it with rssi             — API surfaces it
+  official radio bytes -> WifiReceiver/PipelineManager -> MQTT -> EMQX
+  -> MqttSubscriber -> Postgres/TimescaleDB -> FastAPI -> HTTP
 
 Usage:
-    RID_DB_PORT=5433 RID_MQTT_HOST=127.0.0.1 python scripts/e2e_chain.py
+    RID_DB_PORT=5433 RID_MQTT_HOST=127.0.0.1 \
+        python scripts/e2e_chain.py
 """
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-for pkg in ("edge/src", "server/src"):
-    sys.path.insert(0, str(ROOT / pkg))
+for path in (
+    ROOT / "edge" / "src",
+    ROOT / "server" / "src",
+    ROOT / "edge" / "tests",
+):
+    sys.path.insert(0, str(path))
 
 import aiomqtt  # noqa: E402
-
-from rid_edge.models import Position as EdgePosition  # noqa: E402
-from rid_edge.models import Protocol as EdgeProtocol  # noqa: E402
+from fixtures.odid_vectors import (  # noqa: E402
+    LOCATION,
+    SELF_ID,
+    SYSTEM,
+    WIFI_BEACON_FRAME,
+)
 from rid_edge.models import RidObservation  # noqa: E402
+from rid_edge.odid_parser import message_pack  # noqa: E402
+from rid_edge.pipeline import PipelineManager  # noqa: E402
+from rid_edge.receivers.base import Bearer, RawFrame  # noqa: E402
+from rid_edge.receivers.wifi_nan import WifiReceiver  # noqa: E402
 from rid_server.config import get_settings  # noqa: E402
 from rid_server.mqtt_subscriber import MqttSubscriber  # noqa: E402
+from scapy.layers.dot11 import RadioTap  # noqa: E402
 
-STATION = "SZ-Nanshan-01"
 
-
-def _build(tag: str, operator_id: str | None) -> RidObservation:
-    return RidObservation(
-        observation_id=f"e2e-{tag}-{uuid.uuid4().hex[:12]}",
-        drone_id=f"E2E-{tag.upper()}",
-        operator_id=operator_id,
-        protocol=EdgeProtocol.ASTM_F3411,
-        station_id=STATION,
-        rssi_dbm=-63,
-        position=EdgePosition(
-            lat=22.5405,
-            lon=113.9345,
-            alt_m=118.0,
-            accuracy_h_m=4.0,
-            accuracy_v_m=6.0,
-            speed_mps=14.2,
-            heading_deg=47.0,
-        ),
-        drone_timestamp=datetime.now(timezone.utc),
-        self_id=f"e2e {tag} mission",
+def _official_beacon_frame() -> RawFrame:
+    receiver = WifiReceiver()
+    packet = RadioTap(
+        bytes(RadioTap(present=0x20, dBm_AntSignal=-61)) + WIFI_BEACON_FRAME
     )
+    receiver._on_pkt(packet)
+    if receiver._queue.empty():
+        raise RuntimeError("official beacon did not reach the receiver queue")
+    return receiver._queue.get_nowait()
+
+
+def _unidentified_frame(run: str) -> RawFrame:
+    """Location + Self-ID + System, deliberately no Basic/Operator ID."""
+    builder = message_pack.MessagePackParser()
+    for msg_type, payload in (
+        (message_pack.SubMessageType.LOCATION, LOCATION),
+        (message_pack.SubMessageType.SELF_ID, SELF_ID),
+        (message_pack.SubMessageType.SYSTEM, SYSTEM),
+    ):
+        builder.add(message_pack.SubMessage(msg_type, payload))
+
+    suffix = int(run[:8], 16)
+    mac = f"02:00:{(suffix >> 24) & 0xff:02x}:{(suffix >> 16) & 0xff:02x}:{(suffix >> 8) & 0xff:02x}:{suffix & 0xff:02x}"
+    return RawFrame(
+        bearer=Bearer.BLE,
+        source_mac=mac,
+        rssi_dbm=-63,
+        payload=bytes(builder.build()),
+        timestamp=datetime.now(timezone.utc),
+    )
+
+
+def _build_observations(run: str, station: str) -> tuple[RidObservation, RidObservation]:
+    pipeline = PipelineManager(station_id=station)
+
+    identified = pipeline.process(_official_beacon_frame())
+    if len(identified) != 1:
+        raise RuntimeError(f"expected one identified observation, got {len(identified)}")
+
+    unidentified = pipeline.process(_unidentified_frame(run))
+    if len(unidentified) != 1:
+        raise RuntimeError(
+            f"expected one unidentified observation, got {len(unidentified)}"
+        )
+    return identified[0], unidentified[0]
 
 
 async def main() -> int:
-    settings = get_settings()
-    # Unique client ID per run.  MQTT brokers allow one connection per
-    # client ID — reuse the default "rid-server" and the broker kicks
-    # whichever connection came first, producing a reconnect storm where
-    # neither subscriber ever sees a message.
-    #
-    # Also: publish on a run-scoped topic version.  A long-lived
-    # production container may still be subscribed to rid/v1/+/obs with
-    # older code; both subscribers would receive the same message, and
-    # on a primary-key conflict the first writer wins — so the row in
-    # the DB can be the OLD schema's row, making rssi look NULL.  A
-    # private topic keeps the verification honest without touching
-    # anything that's already running.
     run = uuid.uuid4().hex[:8]
+    station = f"E2E-{run}"
     topic_version = f"v2-{run}"
-    settings = settings.model_copy(
+
+    base_settings = get_settings()
+    settings = base_settings.model_copy(
         update={
             "mqtt_client_id": f"rid-e2e-{run}",
             "mqtt_obs_topic": f"rid/{topic_version}/+/obs",
+            "mqtt_info_topic": f"rid/{topic_version}/+/info",
         }
     )
-    topic = f"rid/{topic_version}/{STATION}/obs"
-    identified = _build(f"good{run}", "OP-E2E-1")
-    ghost = _build(f"ghost{run}", None)
+    topic = f"rid/{topic_version}/{station}/obs"
 
-    print(f"[1/5] built 2 observations (run={run})")
+    identified, ghost = _build_observations(run, station)
+    print(
+        f"[1/5] decoded official frames: identified={identified.drone_id} "
+        f"ghost={ghost.drone_id}"
+    )
 
     received: list[str] = []
     errors: list[str] = []
+    persisted = [identified, ghost]
 
     async def on_persisted(obs) -> None:
         received.append(obs.observation_id)
 
-    sub = MqttSubscriber(settings)
-    sub.on_persisted = on_persisted
+    subscriber = MqttSubscriber(settings)
+    subscriber.on_persisted = on_persisted
 
     async with aiomqtt.Client(
-        hostname=settings.mqtt_host, port=settings.mqtt_port
-    ) as pub:
+        hostname=settings.mqtt_host,
+        port=settings.mqtt_port,
+        identifier=f"rid-e2e-pub-{run}",
+    ) as publisher:
         print(f"[2/5] connected to MQTT {settings.mqtt_host}:{settings.mqtt_port}")
 
-        # Subscribe first so we don't miss our own messages.
-        async def run_sub():
+        async def run_subscriber() -> None:
             try:
-                await sub.start()
-            except Exception as e:  # noqa: BLE001
-                errors.append(f"subscriber: {e}")
+                await subscriber.start()
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"subscriber: {exc}")
 
-        sub_task = asyncio.create_task(run_sub())
+        subscriber_task = asyncio.create_task(run_subscriber())
         await asyncio.sleep(1.5)
 
-        for obs in (identified, ghost):
-            await pub.publish(topic, obs.to_mqtt_payload(), qos=1)
-            print(f"[3/5] published {obs.observation_id} → {topic}")
+        for obs in persisted:
+            await publisher.publish(topic, obs.to_mqtt_payload(), qos=1)
+            print(
+                f"[3/5] published {obs.observation_id[:16]}… "
+                f"protocol={obs.protocol.value}"
+            )
 
-        # Give the subscriber time to persist both.
         for _ in range(40):
             await asyncio.sleep(0.25)
-            if len(received) >= 2:
+            if len(received) >= len(persisted):
                 break
-        sub_task.cancel()
+
+        subscriber_task.cancel()
         try:
-            await sub_task
+            await subscriber_task
         except (asyncio.CancelledError, Exception):  # noqa: BLE001
             pass
 
-    print(f"[4/5] subscriber persisted {len(received)}/2: {received}")
+    print(f"[4/5] subscriber persisted {len(received)}/{len(persisted)}")
     if errors:
-        for e in errors:
-            print(f"      ✗ {e}")
-    if len(received) < 2:
+        for error in errors:
+            print(f"      FAIL: {error}")
+    if len(received) < len(persisted):
         print("FAIL: messages did not reach the database")
         return 1
 
-    # 5) Read back over HTTP.
     import httpx
-
     from rid_server.app import create_app
 
     app = create_app()
     app.state.bus = None
-    app.state.subscriber = sub
+    app.state.subscriber = subscriber
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
-        r = await c.get("/observations", params={"limit": 50})
-        r.raise_for_status()
-        rows = [o for o in r.json() if o["observation_id"] in received]
-        ghost_ids = await c.get("/drones/unidentified")
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+        response = await client.get("/observations", params={"limit": 50})
+        response.raise_for_status()
+        rows = [
+            row
+            for row in response.json()
+            if row["observation_id"] in received and row["station_id"] == station
+        ]
+        ghost_ids = await client.get("/drones/unidentified")
 
-    print(f"[5/5] HTTP returned {len(rows)}/2 of our rows")
-    for o in rows:
+    print(f"[5/5] HTTP returned {len(rows)}/{len(persisted)} of our rows")
+    for row in rows:
         print(
-            f"      {o['observation_id']}  drone={o['drone_id']}  "
-            f"op={o['operator_id']}  rssi={o.get('rssi_dbm')}  "
-            f"speed={o['position']['speed_mps']}"
+            f"      {row['observation_id'][:16]}… drone={row['drone_id']} "
+            f"op={row['operator_id']} protocol={row['protocol']} "
+            f"rssi={row.get('rssi_dbm')} speed={row['position']['speed_mps']}"
         )
 
     ok = True
-    if len(rows) != 2:
+    if len(rows) != len(persisted):
         print("FAIL: HTTP did not return both rows")
         ok = False
-    missing_rssi = [o for o in rows if o.get("rssi_dbm") is None]
-    if missing_rssi:
-        print("FAIL: rssi lost between ingest and HTTP")
+    if any(row.get("rssi_dbm") is None for row in rows):
+        print("FAIL: RSSI lost between ingest and HTTP")
         ok = False
-    missing_speed = [o for o in rows if not o["position"]["speed_mps"]]
-    if missing_speed:
-        print("FAIL: speed_mps lost (the original bug)")
+    if any(not row["position"]["speed_mps"] for row in rows):
+        print("FAIL: speed_mps lost between ingest and HTTP")
         ok = False
     if ghost.drone_id not in ghost_ids.json():
         print(f"FAIL: ghost drone {ghost.drone_id} not listed as unidentified")
         ok = False
+    by_id = {row["observation_id"]: row for row in rows}
+    if by_id.get(identified.observation_id, {}).get("protocol") != "wifi_beacon":
+        print("FAIL: official Wi-Fi Beacon was not labelled wifi_beacon")
+        ok = False
+    identified_row = by_id.get(identified.observation_id, {})
+    operator_location = identified_row.get("operator_location") or {}
+    if operator_location.get("lat") is None:
+        print("FAIL: operator location was lost between ingest and HTTP")
+        ok = False
 
-    print("PASS: edge → MQTT → server → DB → HTTP verified" if ok else "FAILED")
+    print(
+        "PASS: official radio bytes -> MQTT -> server -> DB -> HTTP verified"
+        if ok
+        else "FAILED"
+    )
     return 0 if ok else 1
 
 

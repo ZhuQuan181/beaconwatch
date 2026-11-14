@@ -12,6 +12,8 @@ import type { DroneObservation, GeofenceZone } from "./types";
 
 /** How far back the history buffer reaches, for the timeline window. */
 const HISTORY_LIMIT = 1000;
+/** History/unidentified refresh cadence.  Live rows still arrive via WS. */
+const HISTORY_REFRESH_MS = 4_000;
 
 export function App() {
   const { recent, alerts, total, connected, error } = useObservationsStream();
@@ -46,29 +48,39 @@ export function App() {
       .catch(() => setZones([]));
   }, []);
 
-  // Pull the history window once, and refresh it when the live stream
-  // grows, so the scrubber's bounds track reality without a polling loop.
+  // Refresh timeline metadata on a fixed cadence.  This used to depend on
+  // `total`, which changes for every WebSocket row: a busy feed launched
+  // a 1,000-row history request (and another unidentified query) for every
+  // single observation.  Polling decouples HTTP load from ingest rate.
   useEffect(() => {
     let alive = true;
-    api
-      .listObservations({ limit: HISTORY_LIMIT })
-      .then((rows) => {
-        if (alive) setHistory(rows);
-      })
-      .catch(() => {
-        /* timeline stays empty; the live view is unaffected */
-      });
+    let refreshing = false;
+
+    const refresh = async () => {
+      if (!alive || refreshing || document.visibilityState === "hidden") return;
+      refreshing = true;
+      try {
+        const [rows, unidentified] = await Promise.all([
+          api.listObservations({ limit: HISTORY_LIMIT }),
+          api.listUnidentified(),
+        ]);
+        if (!alive) return;
+        setHistory(rows);
+        setGhostIds(unidentified);
+      } catch {
+        /* keep the previous snapshot; the live view is unaffected */
+      } finally {
+        refreshing = false;
+      }
+    };
+
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), HISTORY_REFRESH_MS);
     return () => {
       alive = false;
+      window.clearInterval(timer);
     };
-  }, [total]);
-
-  useEffect(() => {
-    api
-      .listUnidentified()
-      .then(setGhostIds)
-      .catch(() => setGhostIds([]));
-  }, [total]);
+  }, []);
 
   // When the cursor moves, fetch a window that ends at the cursor.
   //

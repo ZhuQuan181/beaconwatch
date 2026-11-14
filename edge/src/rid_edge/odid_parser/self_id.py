@@ -1,26 +1,24 @@
-"""Self-ID message (MessageType 0x3).
+"""Self-ID message (MessageType 0x3), exactly 25 bytes.
 
-Per ASTM F3411-22 §A.2.3 the payload is 23 bytes:
-
-    offset  size  field
-    ------  ----  -----
-       0     1    MessageType (0x3) | DescriptionType (5 bits)
-       1    22    Description (ASCII, zero-padded)
+    byte 0       type/protocol
+    byte 1       description type (full uint8; values above 2 are vendor-specific)
+    bytes 2..24  23-byte free-text description, NUL padded
 """
 from __future__ import annotations
 
 import dataclasses
 from typing import ClassVar
 
-from rid_edge.odid_parser.constants import SelfIDType
+from rid_edge.odid_parser.constants import MESSAGE_SIZE, MsgType
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
 class SelfIDMessage:
-    SIZE: ClassVar[int] = 23
+    SIZE: ClassVar[int] = MESSAGE_SIZE
 
-    description_type: SelfIDType
+    description_type: int
     description: str
+    protocol_version: int = 2
 
     def is_valid(self) -> bool:
         return bool(self.description.strip("\x00 "))
@@ -29,15 +27,19 @@ class SelfIDMessage:
 def decode(payload: bytes) -> SelfIDMessage | None:
     if len(payload) < SelfIDMessage.SIZE:
         return None
-    desc_type_raw = payload[0] & 0x1F
-    try:
-        desc_type = SelfIDType(desc_type_raw)
-    except ValueError:
+    if payload[0] >> 4 != MsgType.SELF_ID:
         return None
-    desc_bytes = payload[1:23]
-    try:
-        desc = desc_bytes.decode("ascii", errors="replace").rstrip("\x00").strip()
-    except UnicodeDecodeError:
+
+    description = payload[2:25].decode("ascii", errors="replace")
+    description = description.rstrip("\x00 ").strip()
+    if not description:
         return None
-    msg = SelfIDMessage(description_type=desc_type, description=desc)
-    return msg if msg.is_valid() else None
+
+    return SelfIDMessage(
+        description_type=payload[1],
+        description=description,
+        protocol_version=payload[0] & 0x0F,
+    )
+
+
+__all__ = ["SelfIDMessage", "decode"]

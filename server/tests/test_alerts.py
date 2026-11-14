@@ -183,6 +183,21 @@ def test_different_zones_alert_independently():
     assert {a.severity for a in alerts} == {"warn", "critical"}
 
 
+def test_alert_id_is_deterministic_across_engine_instances():
+    """Alert ids must survive process restarts and hash randomization.
+
+    They used to come from Python's salted ``hash()``, so the same alert
+    changed id after every restart.  The id is part of the API and
+    WebSocket dedup contract, not an ephemeral display detail.
+    """
+    first = AlertEngine(max_alt_m=None).evaluate(obs(op=None, drone="ghost-1"))
+    second = AlertEngine(max_alt_m=None).evaluate(obs(op=None, drone="ghost-1"))
+
+    assert len(first) == len(second) == 1
+    assert first[0].alert_id == second[0].alert_id
+    assert first[0].alert_id == "unidentified-c9ec5eea713dd4d7"
+
+
 # ── Multiple rules at once ───────────────────────────────────────────
 def test_one_observation_can_trip_several_rules():
     """Inside a zone, over the ceiling, no operator ID — three alerts."""

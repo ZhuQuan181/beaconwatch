@@ -16,18 +16,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml ./
+COPY src ./src
 RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple \
  && pip config set global.trusted-host pypi.tuna.tsinghua.edu.cn \
  && pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir .
 
-COPY src ./src
 COPY alembic ./alembic
 COPY alembic.ini ./
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app/src
 
 EXPOSE 8000
 
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["uvicorn", "rid_server.app:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -12,6 +12,7 @@ from conftest import make_obs
 from rid_server.mqtt_subscriber import MqttSubscriber
 from rid_server.repository import (
     list_drones,
+    list_stations,
     upsert_station,
 )
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -157,3 +158,62 @@ async def test_handle_message_two_messages_same_drone_increments_count(
     async with factory() as s:
         drones = await list_drones(s, online_within_s=3600)
         assert drones[0].observation_count == 2
+
+
+async def test_station_info_updates_name_and_coordinates(
+    db_engine, _sqlite_settings
+):
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    sub = MqttSubscriber(_sqlite_settings)
+    payload = {
+        "station_id": "station-info-1",
+        "name": "Nanshan receiver",
+        "firmware_version": "0.2.0",
+        "capabilities": ["ble", "wifi_nan"],
+        "location": {
+            "lat": 22.5405,
+            "lon": 113.9345,
+            "alt_m": 18.0,
+            "accuracy_h_m": 3.0,
+            "accuracy_v_m": 5.0,
+            "speed_mps": 0.0,
+            "heading_deg": 0.0,
+        },
+    }
+    await sub.handle_message(
+        "rid/v1/station-info-1/info", json.dumps(payload).encode()
+    )
+
+    assert sub.station_infos == 1
+    assert sub.invalid == 0
+    async with factory() as s:
+        rows = await list_stations(s)
+    assert len(rows) == 1
+    assert rows[0].name == "Nanshan receiver"
+    assert rows[0].lat == 22.5405
+    assert rows[0].lon == 113.9345
+    assert rows[0].firmware_version == "0.2.0"
+    assert rows[0].last_seen is not None
+
+
+async def test_station_info_trusts_topic_station_id(db_engine, _sqlite_settings):
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    sub = MqttSubscriber(_sqlite_settings)
+    payload = {
+        "station_id": "payload-lie",
+        "name": "Topic station",
+        "firmware_version": "0.2.0",
+        "location": {
+            "lat": 22.5,
+            "lon": 113.9,
+            "alt_m": 10.0,
+            "accuracy_h_m": 3.0,
+            "accuracy_v_m": 5.0,
+            "speed_mps": 0.0,
+            "heading_deg": 0.0,
+        },
+    }
+    await sub.handle_message("rid/v1/topic-station/info", json.dumps(payload).encode())
+    async with factory() as s:
+        rows = await list_stations(s)
+    assert [r.station_id for r in rows] == ["topic-station"]

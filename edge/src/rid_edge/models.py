@@ -18,6 +18,7 @@ class Protocol(str, enum.Enum):
 
     ASTM_F3411 = "astm_f3411"
     WIFI_NAN = "wifi_nan"
+    WIFI_BEACON = "wifi_beacon"
 
 
 class Position(BaseModel):
@@ -156,7 +157,7 @@ class StationInfo(BaseModel):
     station_id: str = Field(min_length=1, max_length=64)
     location: Position
     name: str | None = Field(default=None, max_length=128)
-    firmware_version: str = Field(default="0.1.0", max_length=32)
+    firmware_version: str = Field(default="0.2.0", max_length=32)
     capabilities: list[str] = Field(
         default_factory=lambda: ["ble", "wifi_nan"],
         description="Receiver capabilities: ble, wifi_nan",

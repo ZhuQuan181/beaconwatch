@@ -1,88 +1,83 @@
-"""MessagePack decoder (MessageType 0xF).
+"""Open Drone ID Message Pack (MessageType 0xF).
 
-A MessagePack wraps multiple ODID sub-messages inside a single 802.11
-vendor IE or BLE service-data payload.  Format:
+Wire layout::
 
-    byte 0   : MessageType = 0xF
-    byte 1   : size (number of bytes following, not including this byte)
-    bytes 2..N : concatenation of ODID sub-messages, each starting
-                 with its own 1-byte MessageType.
+    byte 0  message type (high nibble 0xF) + protocol version (low nibble)
+    byte 1  SingleMessageSize, always 25
+    byte 2  MsgPackSize, number of 25-byte messages (1..9)
+    byte 3  first complete 25-byte message
+    ...
 
-Because ODID messages are NOT self-describing (every type has a fixed
-size), the caller has to know each type's size to split the buffer.
-We hard-code them here.
-
-This module also exposes an *encoder* (``MessagePackParser``) that
-builds a MessagePack from a list of ``SubMessage``s.  It is used by
-the test suite and by tooling that synthesises Wi-Fi frames.
+The old implementation treated byte 1 as a byte length and prepended a
+second type byte to every message.  Both were wrong; official captures
+therefore could not be decoded.
 """
 from __future__ import annotations
 
 import dataclasses
 import enum
 
-from rid_edge.odid_parser import basic_id, location, self_id
-from rid_edge.odid_parser.constants import MsgType
+from rid_edge.odid_parser import (
+    basic_id,
+    location,
+    operator_id,
+    self_id,
+    system,
+)
+from rid_edge.odid_parser.constants import (
+    MAX_MESSAGES_PER_PACK,
+    MESSAGE_PACK_HEADER_SIZE,
+    MESSAGE_SIZE,
+    PROTOCOL_VERSION,
+    MsgType,
+)
 
 _SUBMESSAGE_SIZES: dict[int, int] = {
-    MsgType.BASIC_ID: basic_id.BasicIDMessage.SIZE,
-    MsgType.LOCATION: location.LocationMessage.SIZE,
-    MsgType.SELF_ID: self_id.SelfIDMessage.SIZE,
-    # AUTH, SYSTEM, OPERATOR_ID have similar fixed sizes; we don't
-    # decode them in the v1 edge pipeline (server can do it if needed).
+    int(MsgType.BASIC_ID): MESSAGE_SIZE,
+    int(MsgType.LOCATION): MESSAGE_SIZE,
+    int(MsgType.AUTH): MESSAGE_SIZE,
+    int(MsgType.SELF_ID): MESSAGE_SIZE,
+    int(MsgType.SYSTEM): MESSAGE_SIZE,
+    int(MsgType.OPERATOR_ID): MESSAGE_SIZE,
 }
 
 
-# ----------------------------------------------------------------------
-# Encoder
-# ----------------------------------------------------------------------
 class SubMessageType(enum.IntEnum):
-    """Numeric message-type for an ODID sub-message inside a MessagePack.
-
-    Values match the high nibble of the first byte in each sub-message.
-    """
-
     BASIC_ID = MsgType.BASIC_ID
     LOCATION = MsgType.LOCATION
+    AUTH = MsgType.AUTH
     SELF_ID = MsgType.SELF_ID
     SYSTEM = MsgType.SYSTEM
-    AUTH = MsgType.AUTH
     OPERATOR_ID = MsgType.OPERATOR_ID
 
 
 @dataclasses.dataclass(slots=True)
 class SubMessage:
-    """One sub-message in a MessagePack (header-less body)."""
+    """One complete 25-byte encoded message.
+
+    ``payload`` includes the message-type byte.  This mirrors what is
+    placed inside a Message Pack and makes official capture vectors
+    directly usable in tests.
+    """
 
     msg_type: SubMessageType
-    payload: bytes  # size must match the fixed length for msg_type
+    payload: bytes
 
     def __post_init__(self) -> None:
-        expected = _SUBMESSAGE_SIZES.get(int(self.msg_type))
-        if expected is not None and len(self.payload) != expected:
-            # For System/Auth/OperatorID we still know the size (25 each
-            # per spec) but we don't decode; we let the caller pass
-            # exact-length data.
+        if len(self.payload) != _SUBMESSAGE_SIZES[int(self.msg_type)]:
             raise ValueError(
                 f"SubMessage type {self.msg_type.name!r} must be exactly "
-                f"{expected} bytes, got {len(self.payload)}"
+                f"25 bytes, got {len(self.payload)}"
+            )
+        if self.payload[0] >> 4 != int(self.msg_type):
+            raise ValueError(
+                f"payload type nibble {self.payload[0] >> 4:#x} does not "
+                f"match {self.msg_type.name}"
             )
 
 
 class MessagePackParser:
-    """Builder for a MessagePack payload.
-
-    Usage::
-
-        mp = MessagePackParser()
-        mp.add(SubMessage(SubMessageType.BASIC_ID, basic_id_bytes))
-        mp.add(SubMessage(SubMessageType.LOCATION, location_bytes))
-        payload = bytes(mp.build())
-
-    The returned ``payload`` is exactly the bytes that should be placed
-    inside the 802.11 vendor IE (after the OUI) or the BLE service-data
-    value (after the 2-byte UUID).
-    """
+    """Builder for a standards-compliant Message Pack."""
 
     __slots__ = ("_submessages",)
 
@@ -90,95 +85,115 @@ class MessagePackParser:
         self._submessages: list[SubMessage] = []
 
     def add(self, sub: SubMessage) -> None:
+        if len(self._submessages) >= MAX_MESSAGES_PER_PACK:
+            raise ValueError(f"a Message Pack holds at most {MAX_MESSAGES_PER_PACK} messages")
         self._submessages.append(sub)
 
     def build(self) -> bytearray:
         body = bytearray()
-        for s in self._submessages:
-            body.append(int(s.msg_type))
-            body.extend(s.payload)
-        # MessagePack header: type 0xF, size = len(body)
-        return bytearray([MsgType.MESSAGE_PACK, len(body)]) + body
+        for sub in self._submessages:
+            body.extend(sub.payload)
+        if not body:
+            raise ValueError("a Message Pack must contain at least one message")
+        return bytearray(
+            [
+                (MsgType.MESSAGE_PACK << 4) | PROTOCOL_VERSION,
+                MESSAGE_SIZE,
+                len(self._submessages),
+            ]
+        ) + body
 
     def __len__(self) -> int:
-        return sum(1 + len(s.payload) for s in self._submessages) + 2
+        return MESSAGE_PACK_HEADER_SIZE + MESSAGE_SIZE * len(self._submessages)
 
 
-# ----------------------------------------------------------------------
-# Decoder
-# ----------------------------------------------------------------------
 @dataclasses.dataclass(slots=True)
 class ParsedSubmessages:
-    """One or more sub-messages decoded from a single frame."""
+    """Decoded sub-messages from one ODID capture."""
+
     basic_id: list[basic_id.BasicIDMessage] = dataclasses.field(default_factory=list)
     locations: list[location.LocationMessage] = dataclasses.field(default_factory=list)
     self_ids: list[self_id.SelfIDMessage] = dataclasses.field(default_factory=list)
-    raw_blobs: list[tuple[MsgType, bytes]] = dataclasses.field(default_factory=list)
+    systems: list[system.SystemMessage] = dataclasses.field(default_factory=list)
+    operator_ids: list[operator_id.OperatorIDMessage] = dataclasses.field(
+        default_factory=list
+    )
+    raw_blobs: list[tuple[int, bytes]] = dataclasses.field(default_factory=list)
 
     def is_empty(self) -> bool:
-        return not (self.basic_id or self.locations or self.self_ids)
+        return not (
+            self.basic_id
+            or self.locations
+            or self.self_ids
+            or self.systems
+            or self.operator_ids
+        )
 
 
 def decode(payload: bytes) -> ParsedSubmessages | None:
-    """Decode a MessagePack payload (2 header bytes + sub-messages).
-
-    The MessagePack body is a concatenation of sub-message blobs, each
-    starting with a 1-byte message-type prefix.  The 1-byte size in the
-    header is *legacy* (older firmware) and only used as a hint; we walk
-    the body by the per-type known fixed size.
-    """
-    if len(payload) < 2:
+    """Decode a complete Message Pack."""
+    if len(payload) < MESSAGE_PACK_HEADER_SIZE:
         return None
-    declared_size = payload[1]
-    # Body starts at offset 2.  If declared_size matches what the
-    # header says, use that; otherwise treat the rest of the buffer as
-    # body.  This is robust against off-by-one in legacy encoders.
-    body = payload[2 : 2 + declared_size]
-    if len(body) < declared_size:
-        body = payload[2:]
+    if payload[0] >> 4 != MsgType.MESSAGE_PACK:
+        return None
+
+    single_size = payload[1]
+    count = payload[2]
+    if single_size != MESSAGE_SIZE:
+        return None
+    if not 1 <= count <= MAX_MESSAGES_PER_PACK:
+        return None
+    expected = MESSAGE_PACK_HEADER_SIZE + single_size * count
+    if len(payload) < expected:
+        return None
 
     out = ParsedSubmessages()
-    offset = 0
-    while offset < len(body):
-        mt = body[offset]
-        # The per-type known size does NOT include the 1-byte message-type
-        # prefix that precedes each sub-message in the MessagePack body.
-        # We always advance by ``1 + size`` so the next iteration picks
-        # up the correct type byte.
-        size = _SUBMESSAGE_SIZES.get(mt)
-        if size is None:
-            # Unknown / unsupported type — store the raw blob and stop.
-            out.raw_blobs.append((MsgType(mt) if mt in [m.value for m in MsgType] else mt, body[offset:]))
-            break
-        chunk = body[offset + 1 : offset + 1 + size]
-        if len(chunk) < size:
-            break
-        sub = _decode_one(mt, chunk)
-        if sub is not None:
-            if mt == MsgType.BASIC_ID:
-                out.basic_id.append(sub)
-            elif mt == MsgType.LOCATION:
-                out.locations.append(sub)
-            elif mt == MsgType.SELF_ID:
-                out.self_ids.append(sub)
-        offset += 1 + size
+    offset = MESSAGE_PACK_HEADER_SIZE
+    for _ in range(count):
+        chunk = payload[offset : offset + MESSAGE_SIZE]
+        offset += MESSAGE_SIZE
+        message_type = chunk[0] >> 4
+        _decode_one(out, message_type, chunk)
+
     return out if not out.is_empty() else None
 
 
-def _decode_one(mt: int, chunk: bytes):
-    if mt == MsgType.BASIC_ID:
-        return basic_id.decode(chunk)
-    if mt == MsgType.LOCATION:
-        return location.decode(chunk)
-    if mt == MsgType.SELF_ID:
-        return self_id.decode(chunk)
-    return None
+def _decode_one(out: ParsedSubmessages, message_type: int, chunk: bytes) -> None:
+    if message_type == MsgType.BASIC_ID:
+        decoded = basic_id.decode(chunk)
+        if decoded is not None:
+            out.basic_id.append(decoded)
+            return
+    elif message_type == MsgType.LOCATION:
+        decoded = location.decode(chunk)
+        if decoded is not None:
+            out.locations.append(decoded)
+            return
+    elif message_type == MsgType.SELF_ID:
+        decoded = self_id.decode(chunk)
+        if decoded is not None:
+            out.self_ids.append(decoded)
+            return
+    elif message_type == MsgType.SYSTEM:
+        decoded = system.decode(chunk)
+        if decoded is not None:
+            out.systems.append(decoded)
+            return
+    elif message_type == MsgType.OPERATOR_ID:
+        decoded = operator_id.decode(chunk)
+        if decoded is not None:
+            out.operator_ids.append(decoded)
+            return
+
+    # Auth is intentionally preserved as a raw blob; Self-ID and the
+    # identity/location messages are the fields the dashboard needs.
+    out.raw_blobs.append((message_type, chunk))
 
 
 __all__ = [
     "MessagePackParser",
+    "ParsedSubmessages",
     "SubMessage",
     "SubMessageType",
-    "ParsedSubmessages",
     "decode",
 ]

@@ -25,6 +25,24 @@ class Position(BaseModel):
     heading_deg: float = Field(ge=0.0, le=360.0)
 
 
+class OperatorLocation(BaseModel):
+    """Operator/pilot location carried by the ODID System message.
+
+    The System message contains only the operator's geodetic position;
+    speed, heading and accuracy belong to the aircraft, not the pilot.
+    Reusing :class:`Position` here rejected every valid System message
+    because it demanded fields that do not exist on the wire.
+    """
+
+    # Older rows stored a full aircraft Position under this key.  Ignore
+    # its extra motion/accuracy fields so upgrades can still replay data.
+    model_config = ConfigDict(extra="ignore")
+
+    lat: float = Field(ge=-90.0, le=90.0)
+    lon: float = Field(ge=-180.0, le=180.0)
+    alt_m: float = Field(ge=-1000.0, le=10000.0)
+
+
 class DroneObservation(BaseModel):
     """Server-side view of a single observation.
 
@@ -55,7 +73,7 @@ class DroneObservation(BaseModel):
         description="Free-text self-ID; the edge sends null when the drone "
         "broadcasts no Self-ID message, so this must accept None.",
     )
-    operator_location: Position | None = None
+    operator_location: OperatorLocation | None = None
 
 
 class Station(BaseModel):
@@ -72,6 +90,18 @@ class Station(BaseModel):
     last_seen: datetime | None = None
     firmware_version: str = ""
     coverage_radius_m: float = 3000.0
+
+
+class StationInfo(BaseModel):
+    """Edge station heartbeat published to ``rid/v1/{station_id}/info``."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    station_id: str = Field(min_length=1, max_length=64)
+    location: Position
+    name: str | None = Field(default=None, max_length=128)
+    firmware_version: str = Field(default="0.2.0", max_length=32)
+    capabilities: list[str] = Field(default_factory=lambda: ["ble", "wifi_nan"])
 
 
 class GeofenceZoneOut(BaseModel):

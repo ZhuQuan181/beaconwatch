@@ -22,6 +22,7 @@ Design notes that matter:
 """
 from __future__ import annotations
 
+import hashlib
 import math
 import time
 from dataclasses import dataclass, field
@@ -208,8 +209,11 @@ class AlertEngine:
             if now - prev < window:
                 return None
         self._last_fired[dedup_key] = now
+        digest = hashlib.sha256(
+            "|".join(dedup_key).encode("utf-8")
+        ).hexdigest()[:16]
         return Alert(
-            alert_id=f"{rule}-{obs.drone_id}-{abs(hash(dedup_key)) % 10**8}",
+            alert_id=f"{rule}-{digest}",
             rule=rule,
             severity=severity,
             drone_id=obs.drone_id,

@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     station_lat: float = Field(default=0.0, ge=-90, le=90)
     station_lon: float = Field(default=0.0, ge=-180, le=180)
     station_alt_m: float = Field(default=0.0, ge=-1000, le=100000)
-    firmware_version: str = Field(default="0.1.0", max_length=32)
+    firmware_version: str = Field(default="0.2.0", max_length=32)
 
     # ---- Wi-Fi receiver ----
     wifi_enabled: bool = Field(default=True)
@@ -73,6 +73,12 @@ class Settings(BaseSettings):
         description="Suppress same drone emission within this window",
     )
     dedup_max_keys: int = Field(default=4096, ge=16)
+    max_obs_per_sec: int = Field(
+        default=50,
+        ge=1,
+        le=1000,
+        description="Per-station outgoing observation rate cap",
+    )
 
     # ---- Local buffer (offline safe) ----
     buffer_db_path: Path = Field(
@@ -96,6 +102,12 @@ class Settings(BaseSettings):
     mqtt_client_id_prefix: str = Field(default="rid-edge")
     mqtt_keepalive_s: int = Field(default=60, ge=10, le=3600)
     mqtt_qos: Literal[0, 1, 2] = Field(default=1)
+    mqtt_ack_timeout_s: float = Field(
+        default=10.0,
+        gt=0,
+        le=120,
+        description="Wait this long for a QoS 1/2 PUBACK before re-buffering",
+    )
     mqtt_topic_prefix: str = Field(default="rid/v1")
 
     # ---- Station heartbeat ----

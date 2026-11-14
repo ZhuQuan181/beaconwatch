@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 
 from ..common.geo import is_zero_coordinate
 from ..models import (
+    OperatorLocation,
     Position,
     Protocol,
     RidObservation,
@@ -51,13 +52,11 @@ def _observation_id(raw: RawFrame, uas_id: str) -> str:
 
 def _parse_payload(raw: RawFrame) -> ParsedSubmessages | None:
     """Dispatch to the right per-bearer parser."""
-    if raw.bearer == Bearer.WIFI_NAN:
-        # The Wi-Fi raw_frame already extracted the ODID bytes; the
-        # downstream frame_parser handles both single-message and
-        # MessagePack envelopes.  We feed it as a single-byte ad_type
-        # to reuse the dispatcher.
+    if raw.bearer in (Bearer.WIFI_NAN, Bearer.WIFI_BEACON):
+        # The Wi-Fi receiver already extracted the ODID bytes; the
+        # frame parser handles both single-message and MessagePack
+        # envelopes.
         from ..odid_parser import frame_parser
-        # _parse_odid_bytes is private but exactly what we need.
         return frame_parser._parse_odid_bytes(raw.payload)  # type: ignore[attr-defined]
     if raw.bearer == Bearer.BLE:
         from ..odid_parser import frame_parser
@@ -78,6 +77,8 @@ def observations_from_frame(raw: RawFrame) -> list[RidObservation]:
     basic_ids = parsed.basic_id or []
     locations = parsed.locations or []
     self_ids = parsed.self_ids or []
+    systems = parsed.systems or []
+    operator_ids = parsed.operator_ids or []
 
     # If no BasicID was sent, synthesize a placeholder from the MAC so
     # the location message can still produce an observation.
@@ -91,11 +92,29 @@ def observations_from_frame(raw: RawFrame) -> list[RidObservation]:
 
     out: list[RidObservation] = []
     self_id_text = self_ids[0].description if self_ids else None
+    operator_id_text = operator_ids[0].operator_id if operator_ids else None
+    operator_location = None
+    if systems:
+        system_message = systems[0]
+        if not (
+            system_message.operator_lat == 0.0
+            and system_message.operator_lon == 0.0
+        ):
+            operator_location = OperatorLocation(
+                lat=system_message.operator_lat,
+                lon=system_message.operator_lon,
+                alt_m=max(-1000.0, system_message.operator_alt_m),
+            )
 
     for bid in basic_ids:
         for loc in locations:
             obs = _build_observation(
-                raw=raw, bid=bid, loc=loc, self_id_text=self_id_text
+                raw=raw,
+                bid=bid,
+                loc=loc,
+                self_id_text=self_id_text,
+                operator_id_text=operator_id_text,
+                operator_location=operator_location,
             )
             if obs is not None:
                 out.append(obs)
@@ -104,7 +123,12 @@ def observations_from_frame(raw: RawFrame) -> list[RidObservation]:
     if not locations:
         for bid in basic_ids:
             obs = _build_observation(
-                raw=raw, bid=bid, loc=None, self_id_text=self_id_text
+                raw=raw,
+                bid=bid,
+                loc=None,
+                self_id_text=self_id_text,
+                operator_id_text=operator_id_text,
+                operator_location=operator_location,
             )
             if obs is not None:
                 out.append(obs)
@@ -117,6 +141,8 @@ def _build_observation(
     bid: basic_id_mod.BasicIDMessage,
     loc: location_mod.LocationMessage | None,
     self_id_text: str | None,
+    operator_id_text: str | None,
+    operator_location: OperatorLocation | None,
 ) -> RidObservation | None:
     drone_id = bid.uas_id.strip().rstrip("\x00") or f"unknown:{raw.source_mac}"
 
@@ -137,21 +163,24 @@ def _build_observation(
         # a very large accuracy so the server knows it's a placeholder.
         position = Position(lat=0.0, lon=0.0, alt_m=0.0, accuracy_h_m=1e6)
 
-    protocol = (
-        Protocol.WIFI_NAN if raw.bearer == Bearer.WIFI_NAN else Protocol.ASTM_F3411
-    )
+    if raw.bearer == Bearer.WIFI_BEACON:
+        protocol = Protocol.WIFI_BEACON
+    elif raw.bearer == Bearer.WIFI_NAN:
+        protocol = Protocol.WIFI_NAN
+    else:
+        protocol = Protocol.ASTM_F3411
 
     return RidObservation(
         observation_id=_observation_id(raw, drone_id),
         drone_id=drone_id,
-        operator_id=None,  # filled in by OperatorID message in the future
+        operator_id=operator_id_text,
         protocol=protocol,
         station_id="unknown-station",  # placeholder; PipelineManager overwrites
         rssi_dbm=raw.rssi_dbm,
         position=position,
         drone_timestamp=raw.timestamp,
         received_at=datetime.now(timezone.utc),
-        operator_location=None,
+        operator_location=operator_location,
         self_id=self_id_text,
     )
 

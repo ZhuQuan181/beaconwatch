@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     http_host: str = "0.0.0.0"
     http_port: int = 8000
 
-    # ── PostgreSQL / PostGIS / TimescaleDB ──────────────────────────
+    # ── PostgreSQL / TimescaleDB ────────────────────────────────────
     db_host: str = "localhost"
     db_port: int = 5432
     db_name: str = "rid"
@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     mqtt_tls: bool = False
     mqtt_client_id: str = "rid-server"
     mqtt_obs_topic: str = "rid/v1/+/obs"
+    mqtt_info_topic: str = "rid/v1/+/info"
     mqtt_qos: int = Field(default=1, ge=0, le=2)
 
     # ── Alert rules ─────────────────────────────────────────────────

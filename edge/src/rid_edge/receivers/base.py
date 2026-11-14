@@ -22,6 +22,7 @@ class Bearer(str, enum.Enum):
     """Physical layer that produced the frame."""
 
     WIFI_NAN = "wifi_nan"
+    WIFI_BEACON = "wifi_beacon"
     BLE = "ble"
 
 

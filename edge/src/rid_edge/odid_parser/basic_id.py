@@ -1,86 +1,77 @@
-"""Basic ID message (MessageType 0x0).
+"""Basic ID message (MessageType 0x0), exactly 25 bytes.
 
-Per ASTM F3411-22 §A.2.1 the layout is exactly 25 bytes:
+ASTM F3411 / Open Drone ID layout:
 
-    offset  size  field
-    ------  ----  -----
-       0     1    MessageType (high nibble) | ProtocolVersion (low nibble)
-       1    18    UAS ID (ASCII, zero-padded on the right)
-      19     1    Reserved (0)
-      20     1    IDType (low 3 bits) | UAType (low 4 bits, top bit reserved)
-      21     1    Reserved
-      22     1    Reserved
-      23     1    Reserved
-      24     1    Reserved
-
-Many real-world implementations actually pack this slightly differently;
-the spec also defines an "alternative" layout where IDType/UAType live in
-byte 1.  We follow the layout above, which is the one used by the
-ODID reference C implementation.
+    byte 0       high nibble = message type (0), low nibble = protocol version
+    byte 1       high nibble = ID type, low nibble = UA type
+    bytes 2..21  20-byte UAS ID, ASCII, NUL padded
+    bytes 22..24 reserved
 """
 from __future__ import annotations
 
 import dataclasses
 from typing import ClassVar
 
-from rid_edge.odid_parser.constants import IDType, UAType
+from rid_edge.odid_parser.constants import (
+    MESSAGE_SIZE,
+    IDType,
+    MsgType,
+    UAType,
+)
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
 class BasicIDMessage:
-    """Decoded Basic ID message."""
-
-    SIZE: ClassVar[int] = 25
+    SIZE: ClassVar[int] = MESSAGE_SIZE
 
     id_type: IDType
     ua_type: UAType
     uas_id: str
+    protocol_version: int = 2
 
     def is_valid(self) -> bool:
-        """Reject the all-zero "no remote ID" beacon that some chips emit."""
-        return (
-            self.id_type != IDType.NONE
-            and self.ua_type != UAType.NONE
-            and bool(self.uas_id.strip("\x00 "))
-        )
+        return bool(self.uas_id.strip("\x00 "))
 
     def __repr__(self) -> str:  # pragma: no cover - cosmetic
+        ua = self.ua_type.label if isinstance(self.ua_type, UAType) else self.ua_type
         return (
-            f"BasicIDMessage(uas_id={self.uas_id!r}, "
-            f"ua_type={self.ua_type.label}, id_type={self.id_type.name})"
+            f"BasicIDMessage(uas_id={self.uas_id!r}, ua_type={ua}, "
+            f"id_type={self.id_type})"
         )
 
 
 def decode(payload: bytes) -> BasicIDMessage | None:
-    """Decode a Basic ID payload.  Returns None on malformed input.
-
-    `payload` MUST be exactly `SIZE` bytes (i.e. the caller has already
-    stripped the per-frame message-type envelope).  In practice the
-    MessagePack parser strips that; the raw-frame parser just passes
-    each 25-byte slice.
-    """
+    """Decode a complete 25-byte Basic ID message."""
     if len(payload) < BasicIDMessage.SIZE:
         return None
-
-    # bytes 1..19 = 18 ASCII chars (zero-padded on the right)
-    uas_id_bytes = payload[1:19]
-    try:
-        uas_id = uas_id_bytes.decode("ascii").rstrip("\x00 ").strip()
-    except UnicodeDecodeError:
+    message_type = payload[0] >> 4
+    if message_type != MsgType.BASIC_ID:
         return None
 
-    if not uas_id:
-        return None
-
-    # byte 20: low 3 bits = IDType, low 4 bits of byte 21 = UAType
-    id_type_raw = payload[20] & 0x07
-    ua_type_raw = payload[21] & 0x0F
-
+    id_type_raw = payload[1] >> 4
+    ua_type_raw = payload[1] & 0x0F
     try:
         id_type = IDType(id_type_raw)
         ua_type = UAType(ua_type_raw)
     except ValueError:
+        # Reserved values from newer revisions should not crash ingest.
         return None
 
-    msg = BasicIDMessage(id_type=id_type, ua_type=ua_type, uas_id=uas_id)
-    return msg if msg.is_valid() else None
+    uas_id_raw = payload[2:22]
+    try:
+        uas_id = uas_id_raw.decode("ascii", errors="strict")
+    except UnicodeDecodeError:
+        uas_id = uas_id_raw.decode("ascii", errors="replace")
+    uas_id = uas_id.rstrip("\x00 ").strip()
+    if not uas_id:
+        return None
+
+    return BasicIDMessage(
+        id_type=id_type,
+        ua_type=ua_type,
+        uas_id=uas_id,
+        protocol_version=payload[0] & 0x0F,
+    )
+
+
+__all__ = ["BasicIDMessage", "decode"]

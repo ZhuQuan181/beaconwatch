@@ -26,15 +26,18 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from datetime import datetime, timezone
 from typing import AsyncIterator, Optional
 
-from scapy.layers.dot11 import Dot11, Dot11Beacon, Dot11Elt
+from scapy.layers.dot11 import Dot11, Dot11Beacon
 from scapy.sendrecv import AsyncSniffer
 
-from rid_edge.odid_parser.constants import ODID_OUI
+from rid_edge.odid_parser.frame_parser import extract_wifi_odid_payloads
 
 from .base import Bearer, RawFrame, Receiver, ReceiverError, parse_mac
+
+log = logging.getLogger(__name__)
 
 # 2.4 GHz channels commonly used by drones. We hop through these.
 _DEFAULT_24G_CHANNELS = [1, 6, 11, 2, 7, 3, 8, 4, 9, 5, 10]
@@ -148,35 +151,49 @@ class WifiReceiver(Receiver):
             if rssi is None or rssi < self.rssi_min_dbm:
                 return
 
-            mac = bytes(pkt[Dot11].addr2 or b"\x00\x00\x00\x00\x00\x00")
-            if mac == b"\x00\x00\x00\x00\x00\x00":
+            source = pkt[Dot11].addr2
+            if source is None:
+                return
+            if isinstance(source, bytes):
+                if len(source) != 6 or source == b"\x00" * 6:
+                    return
+                source_mac = parse_mac(source)
+            else:
+                source_mac = str(source).lower().replace("-", ":")
+                if len(source_mac) != 17 or source_mac == "00:00:00:00:00:00":
+                    return
+
+            payloads = extract_wifi_odid_payloads(pkt)
+            if not payloads:
                 return
 
-            payload = self._extract_odid_payload(pkt)
-            if not payload:
-                return
-
-            frame = RawFrame(
-                bearer=Bearer.WIFI_NAN,
-                source_mac=parse_mac(mac),
-                rssi_dbm=rssi,
-                payload=payload,
-                timestamp=datetime.now(timezone.utc),
-                channel=self._channel or 0,
+            bearer = (
+                Bearer.WIFI_BEACON
+                if pkt.haslayer(Dot11Beacon)
+                else Bearer.WIFI_NAN
             )
-            try:
-                self._queue.put_nowait(frame)
-            except asyncio.QueueFull:
-                # Drop oldest to make room (rare; back-pressure is
-                # better handled by capping RSSI than by queueing).
-                self._dropped += 1
-                with contextlib.suppress(asyncio.QueueEmpty):
-                    self._queue.get_nowait()
-                with contextlib.suppress(asyncio.QueueFull):
+            for payload in payloads:
+                frame = RawFrame(
+                    bearer=bearer,
+                    source_mac=source_mac,
+                    rssi_dbm=rssi,
+                    payload=payload,
+                    timestamp=datetime.now(timezone.utc),
+                    channel=self._channel or 0,
+                )
+                try:
                     self._queue.put_nowait(frame)
-        except Exception:
+                except asyncio.QueueFull:
+                    # Drop oldest to make room (rare; back-pressure is
+                    # better handled by capping RSSI than by queueing).
+                    self._dropped += 1
+                    with contextlib.suppress(asyncio.QueueEmpty):
+                        self._queue.get_nowait()
+                    with contextlib.suppress(asyncio.QueueFull):
+                        self._queue.put_nowait(frame)
+        except Exception as exc:
             # Never let scapy kill its own thread on a malformed frame.
-            pass
+            log.debug("wifi_frame_ignored", error=str(exc)[:200])
 
     @staticmethod
     def _extract_rssi(pkt) -> int | None:
@@ -198,16 +215,8 @@ class WifiReceiver(Receiver):
         1. Vendor-specific IEs (NaN AF body, ODID-in-SSID beacon)
         2. A single SSID prefix match (DJI-style)
         """
-        if not pkt.haslayer(Dot11Elt):
-            return None
-        chunks: list[bytes] = []
-        for elt in pkt[Dot11Elt]:
-            if elt.ID == 0xDD and len(elt.info) >= 3 and elt.info[:3] == ODID_OUI:
-                chunks.append(elt.info[3:])
-        if not chunks:
-            return None
-        # Concatenate; downstream MessagePack decoder will split.
-        return b"".join(chunks)
+        payloads = extract_wifi_odid_payloads(pkt)
+        return payloads[0] if payloads else None
 
     async def _hop_loop(self) -> None:
         channels = _DEFAULT_24G_CHANNELS + _DEFAULT_5G_CHANNELS

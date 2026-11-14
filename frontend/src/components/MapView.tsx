@@ -1,5 +1,12 @@
 import { useEffect, useRef } from "react";
-import maplibregl, { type Map as MlMap, type GeoJSONSource } from "maplibre-gl";
+import {
+  Map as MapLibreMap,
+  NavigationControl,
+  Popup,
+  type GeoJSONSource,
+  type Map as MlMap,
+  type StyleSpecification,
+} from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import type { DroneObservation, GeofenceZone, Station } from "../types";
 
@@ -34,7 +41,7 @@ interface Props {
   onDroneClick?: (droneId: string) => void;
 }
 
-const STYLE: maplibregl.StyleSpecification = {
+const STYLE: StyleSpecification = {
   version: 8,
   sources: {
     basemap: {
@@ -130,6 +137,44 @@ function observationsToGeoJSON(obs: DroneObservation[]): GeoJSON.FeatureCollecti
       },
     })),
   };
+}
+
+function hoverCard(properties: Record<string, unknown>): HTMLElement {
+  const root = document.createElement("div");
+  root.className = "dh";
+
+  const droneId = document.createElement("div");
+  droneId.className = "dh-id";
+  droneId.textContent = String(properties.drone_id ?? "");
+  root.append(droneId);
+
+  const uncertainAltitude = Number(properties.alt_m ?? 0);
+  const altitude = Number.isFinite(uncertainAltitude) ? uncertainAltitude : 0;
+  const uncertainSpeed = Number(properties.speed_mps ?? 0);
+  const speed = Number.isFinite(uncertainSpeed) ? uncertainSpeed : 0;
+
+  const rows: Array<[string, string]> = [
+    ["高度", `${altitude.toFixed(0)} m`],
+    ["速度", `${speed.toFixed(1)} m/s`],
+    ["协议", String(properties.protocol ?? "")],
+  ];
+  for (const [label, value] of rows) {
+    const row = document.createElement("div");
+    row.className = "dh-row";
+    const name = document.createElement("span");
+    name.textContent = label;
+    const reading = document.createElement("b");
+    reading.textContent = value;
+    row.append(name, reading);
+    root.append(row);
+  }
+
+  const unidentified = Boolean(properties.unidentified);
+  const flag = document.createElement("div");
+  flag.className = `dh-flag ${unidentified ? "ghost" : "ok"}`;
+  flag.textContent = unidentified ? "未广播操作员 ID" : "已识别";
+  root.append(flag);
+  return root;
 }
 
 /** Great-circle distance in metres between two lon/lat pairs. */
@@ -284,14 +329,14 @@ export function MapView({
   // and reads the latest callback via the `onDroneClickRef` indirection.
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
-    const map = new maplibregl.Map({
+    const map = new MapLibreMap({
       container: containerRef.current,
       style: STYLE,
       center: [116.397, 39.908], // Beijing-ish default
       zoom: 4,
       attributionControl: { compact: true },
     });
-    map.addControl(new maplibregl.NavigationControl(), "top-right");
+    map.addControl(new NavigationControl(), "top-right");
     map.on("load", () => {
       // ── Layer order (bottom → top) ──────────────────────────────
       // coverage → geofence → trails → drones
@@ -471,7 +516,7 @@ export function MapView({
 
       // Hover card.  Built on Popup rather than a React overlay so it
       // tracks the map during pan/zoom without a re-render per frame.
-      const hover = new maplibregl.Popup({
+      const hover = new Popup({
         closeButton: false,
         closeOnClick: false,
         offset: 12,
@@ -481,22 +526,9 @@ export function MapView({
         const f = e.features?.[0];
         if (!f) return;
         const p = f.properties ?? {};
-        const ghost = Boolean(p.unidentified);
-        const alt = Number(p.alt_m ?? 0);
-        const speed = Number(p.speed_mps ?? 0);
         hover
           .setLngLat((f.geometry as GeoJSON.Point).coordinates as [number, number])
-          .setHTML(
-            `<div class="dh">
-               <div class="dh-id">${String(p.drone_id ?? "")}</div>
-               <div class="dh-row"><span>高度</span><b>${alt.toFixed(0)} m</b></div>
-               <div class="dh-row"><span>速度</span><b>${speed.toFixed(1)} m/s</b></div>
-               <div class="dh-row"><span>协议</span><b>${String(p.protocol ?? "")}</b></div>
-               <div class="dh-flag ${ghost ? "ghost" : "ok"}">
-                 ${ghost ? "未广播操作员 ID" : "已识别"}
-               </div>
-             </div>`,
-          )
+          .setDOMContent(hoverCard(p))
           .addTo(map);
         map.getCanvas().style.cursor = "pointer";
       });

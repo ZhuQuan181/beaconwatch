@@ -30,6 +30,8 @@ from bleak import BleakScanner
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 
+from rid_edge.odid_parser.frame_parser import extract_ble_service_payload
+
 from .base import Bearer, RawFrame, Receiver, ReceiverError
 
 log = logging.getLogger(__name__)
@@ -127,8 +129,8 @@ class BLEReceiver(Receiver):
                     self._queue.get_nowait()
                 with contextlib.suppress(asyncio.QueueFull):
                     self._queue.put_nowait(frame)
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("ble_advertisement_ignored", error=str(exc)[:200])
 
     @staticmethod
     def _extract_odid(adv: AdvertisementData) -> bytes | None:
@@ -136,19 +138,14 @@ class BLEReceiver(Receiver):
         # bleak exposes service_data as {uuid_str: bytes}.
         # We have to match the *16-bit* UUID 0xFFFA.
         for uuid, data in (adv.service_data or {}).items():
-            if not data or len(data) < 3:
+            if not data:
                 continue
             # 16-bit UUIDs are exposed in different formats by different
             # backends; match by both.
             if "fffa" in uuid.lower() or uuid.lower().endswith(":fffa"):
-                # First two bytes are the UUID; payload begins at byte 2.
-                if len(data) < 2:
-                    continue
-                # Sanity: first 2 bytes should equal 0xFFFA (little-endian)
-                if data[0] == 0xFA and data[1] == 0xFF:
-                    return data[2:]
-                else:
-                    return data[2:]
+                payload = extract_ble_service_payload(data)
+                if payload is not None:
+                    return payload
         return None
 
 
