@@ -9,12 +9,14 @@ from typing import Any
 
 import aiomqtt
 from pydantic import ValidationError
+from sqlalchemy import select
 
 from .config import Settings, get_settings
-from .db import get_session_factory
+from .db import GeofenceZone, get_session_factory
 from .logging_setup import get_logger
 from .models import DroneObservation
 from .repository import touch_station, write_observation
+from .alerts import AlertEngine, Zone
 
 log = get_logger(__name__)
 
@@ -39,6 +41,15 @@ class MqttSubscriber:
         # FastAPI lifespan attaches the live ``ObservationBus`` here so
         # WebSocket clients can be notified.  In tests this stays None.
         self.on_persisted: Any = None
+        # Same for alerts — a separate hook so a test can assert on
+        # alerts without wiring a bus.
+        self.on_alert: Any = None
+        # Rule evaluation is optional: with no engine, ingest behaves
+        # exactly as before.  Alerts run AFTER the row is committed, so
+        # an alert always points at a row that exists.
+        self.alerts: AlertEngine | None = None
+        self._zones: list[Zone] = []
+        self._zones_loaded_at: float = 0.0
         # Operational counters
         self.received = 0
         self.persisted = 0
@@ -140,6 +151,19 @@ class MqttSubscriber:
             await touch_station(session, obs.station_id, online=True)
             await write_observation(session, obs)
         self.persisted += 1
+
+        # Evaluate rules only after the row is committed: an alert that
+        # can't be traced back to a stored observation is worse than no
+        # alert.  Failures here must never block ingest.
+        if self.alerts is not None:
+            try:
+                zones = await self._load_zones()
+                for alert in self.alerts.evaluate(obs, zones):
+                    if self.on_alert is not None:
+                        await self.on_alert(alert)
+            except Exception as e:  # noqa: BLE001
+                log.warning("alerts.eval.failed", error=str(e)[:200])
+
         # Fan out to WebSocket clients via the bus, if wired.
         if self.on_persisted is not None:
             try:
@@ -151,6 +175,36 @@ class MqttSubscriber:
             drone_id=obs.drone_id,
             station_id=obs.station_id,
         )
+
+    async def _load_zones(self) -> list[Zone]:
+        """Zones, cached for 30 s.
+
+        Ingest runs at 4 Hz per drone; querying the zone table every
+        message would dominate the write path.  A 30 s staleness window
+        means a newly-drawn no-fly zone starts alerting within half a
+        minute — fast enough for an operator, cheap enough for a hot loop.
+        """
+        import time as _time
+
+        now = _time.monotonic()
+        if self._zones and now - self._zones_loaded_at < 30.0:
+            return self._zones
+        factory = get_session_factory()
+        async with factory() as session:
+            rows = (await session.execute(select(GeofenceZone))).scalars().all()
+        self._zones = [
+            Zone(
+                zone_id=r.zone_id,
+                name=r.name,
+                polygon=r.polygon,
+                min_alt_m=r.min_alt_m,
+                max_alt_m=r.max_alt_m,
+                severity=r.severity,  # type: ignore[arg-type]
+            )
+            for r in rows
+        ]
+        self._zones_loaded_at = now
+        return self._zones
 
     @staticmethod
     def _extract_station_id(topic: str) -> str | None:

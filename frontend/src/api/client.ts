@@ -3,7 +3,13 @@
  * never talk to the server's port directly from the browser (no CORS,
  * no hardcoded hostnames).
  */
-import type { DroneObservation, DroneSummary, Station } from "../types";
+import type {
+  Alert,
+  DroneObservation,
+  DroneSummary,
+  GeofenceZone,
+  Station,
+} from "../types";
 
 const BASE = "/api";
 
@@ -47,4 +53,6 @@ export const api = {
     );
   },
   listUnidentified: () => jsonGet<string[]>("/drones/unidentified"),
+  listZones: () => jsonGet<GeofenceZone[]>("/zones"),
+  listAlerts: (limit = 50) => jsonGet<Alert[]>(`/alerts?limit=${limit}`),
 };

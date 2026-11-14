@@ -109,8 +109,12 @@ async def test_websocket_slow_consumer_does_not_block_publisher(
     assert slow_q.qsize() <= 4
     # Fast consumer got every single item because we never block on it
     assert fast_q.qsize() == 6
-    # The newest item the slow queue holds is the most recent publish
-    assert slow_q._queue[-1] is obs or slow_q._queue[-1].observation_id == obs.observation_id
+    # The newest item the slow queue holds is the most recent publish.
+    # Bus frames are {"kind", "data"} envelopes so observations and
+    # alerts can share one connection.
+    newest = slow_q._queue[-1]
+    assert newest["kind"] == "obs"
+    assert newest["data"]["observation_id"] == obs.observation_id
 
 
 @pytest.fixture

@@ -346,3 +346,112 @@ header.topbar .stat--replay {
   border-radius: 3px;
   background: rgba(240, 180, 41, .08);
 }
+
+/* ── Alert panel ──────────────────────────────────────────────────
+   Sits between Stations and Live Observations so an operator's eye
+   lands on it without scrolling. Critical rows are the only place in
+   the UI that uses a saturated red fill — that exclusivity is what
+   makes them read as urgent rather than decorative. */
+.section--alerts {
+  flex: 0 0 auto;
+  max-height: 40%;
+  overflow-y: auto;
+  padding: 12px 14px;
+}
+
+.alert-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.alert-head h2 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: #6f7a8c;
+  margin: 0;
+}
+.alert-count {
+  font-size: 11px;
+  color: #9aa3b2;
+  font-variant-numeric: tabular-nums;
+}
+.alert-empty {
+  margin: 0;
+  font-size: 12px;
+  color: #58627a;
+}
+
+.alert-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.alert-row {
+  display: grid;
+  grid-template-columns: 3px 1fr;
+  gap: 9px;
+  padding: 7px 9px 7px 0;
+  border-radius: 3px;
+  background: #151a24;
+  cursor: pointer;
+  overflow: hidden;
+}
+.alert-row:hover { background: #1b2130; }
+.alert-row.sev-critical { background: rgba(255, 59, 48, .09); }
+.alert-row.sev-critical:hover { background: rgba(255, 59, 48, .14); }
+
+.alert-mark {
+  border-radius: 2px;
+  background: #8a94a6;
+}
+.alert-mark.sev-critical { background: #ff3b30; }
+.alert-mark.sev-warn { background: #f0b429; }
+.alert-mark.sev-info { background: #5cc8ff; }
+
+.alert-body { min-width: 0; }
+.alert-line-1 {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  margin-bottom: 1px;
+}
+.alert-drone {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-size: 11px;
+  color: #d5dbe7;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.alert-rule {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: #8a94a6;
+  padding: 0 5px;
+  border: 1px solid #2a3142;
+  border-radius: 2px;
+}
+.alert-row.sev-critical .alert-rule {
+  color: #ff8b84;
+  border-color: #7d2420;
+}
+.alert-line-2 {
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: #9aa3b2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.alert-row.sev-critical .alert-line-2 { color: #e0b4b1; }
+.alert-line-3 {
+  font-size: 10px;
+  color: #58627a;
+  font-variant-numeric: tabular-nums;
+  margin-top: 1px;
+}

@@ -12,15 +12,24 @@ from fastapi import (
     Depends,
     HTTPException,
     Query,
+    Request,
     WebSocket,
     WebSocketDisconnect,
     status,
 )
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .bus import ObservationBus
-from .db import get_session
-from .models import DroneObservation, DroneSummary, Position, Station
+from .db import GeofenceZone, get_session
+from .models import (
+    AlertOut,
+    DroneObservation,
+    DroneSummary,
+    GeofenceZoneOut,
+    Position,
+    Station,
+)
 from .repository import (
     drone_to_summary,
     get_drone,
@@ -49,9 +58,100 @@ async def get_stations(
             online=r.online,
             last_seen=r.last_seen,
             firmware_version=r.firmware_version,
+            coverage_radius_m=r.coverage_radius_m,
         )
         for r in rows
     ]
+
+
+# ── Geofence zones ────────────────────────────────────────────────────
+@router.get("/zones", response_model=list[GeofenceZoneOut])
+async def get_zones(
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> list[GeofenceZoneOut]:
+    """No-fly volumes the map draws and the rule engine tests against.
+
+    One source of truth: if the red polygon on screen came from a config
+    file and the alert came from a DB row, the two would drift and an
+    operator would see an alert with no corresponding box.
+    """
+    rows = (await session.execute(select(GeofenceZone))).scalars().all()
+    return [
+        GeofenceZoneOut(
+            zone_id=r.zone_id,
+            name=r.name,
+            polygon=r.polygon,
+            min_alt_m=r.min_alt_m,
+            max_alt_m=r.max_alt_m,
+            severity=r.severity,
+        )
+        for r in rows
+    ]
+
+
+@router.put("/zones/{zone_id}", response_model=GeofenceZoneOut)
+async def upsert_zone(
+    zone_id: str,
+    body: GeofenceZoneOut,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> GeofenceZoneOut:
+    """Create or replace a zone.
+
+    Deliberately a PUT with the id in the path (not POST with a
+    generated id): demo runs re-seed the same zones, and idempotent
+    seeding is worth more here than REST purity.
+    """
+    if len(body.polygon) < 3:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail="polygon needs at least 3 points",
+        )
+    existing = await session.get(GeofenceZone, zone_id)
+    if existing is None:
+        session.add(
+            GeofenceZone(
+                zone_id=zone_id,
+                name=body.name,
+                polygon=body.polygon,
+                min_alt_m=body.min_alt_m,
+                max_alt_m=body.max_alt_m,
+                severity=body.severity,
+            )
+        )
+    else:
+        existing.name = body.name
+        existing.polygon = body.polygon
+        existing.min_alt_m = body.min_alt_m
+        existing.max_alt_m = body.max_alt_m
+        existing.severity = body.severity
+    await session.commit()
+    return GeofenceZoneOut(
+        zone_id=zone_id,
+        name=body.name,
+        polygon=body.polygon,
+        min_alt_m=body.min_alt_m,
+        max_alt_m=body.max_alt_m,
+        severity=body.severity,
+    )
+
+
+# ── Alerts ────────────────────────────────────────────────────────────
+@router.get("/alerts", response_model=list[AlertOut])
+async def get_alerts(
+    request: Request,
+    limit: Annotated[int, Query(ge=1, le=500)] = 50,
+) -> list[AlertOut]:
+    """Alerts seen by this process since startup.
+
+    In-memory, not persisted: an alert is a *derived* fact about
+    observations that are already stored, so recomputing beats a second
+    table that can disagree with the observations.  Surviving restarts
+    would need a persisted table; out of scope for a demo build.
+    """
+    ring = getattr(request.app.state, "alerts", None)
+    if ring is None:
+        return []
+    return [AlertOut(**a) for a in list(ring)[-limit:]]
 
 
 # ── Drones ────────────────────────────────────────────────────────────
@@ -172,10 +272,14 @@ async def ws_observations(
     websocket: WebSocket,
     bus: Annotated[ObservationBus, Depends(_bus_from_app_state)],
 ) -> None:
-    """Fan out newly-persisted observations as JSON frames.
+    """Fan out observations and alerts as JSON frames.
 
     Protocol (server → client):
-        {"type": "obs", "data": <DroneObservation>}
+        {"type": "obs",   "data": <DroneObservation>}
+        {"type": "alert", "data": <Alert>}
+
+    Both ride one connection in arrival order, so a client never sees an
+    alert before the observation that caused it.
 
     The connection is closed by the server if the client sends anything
     other than the optional ``{"type": "ping"}`` heartbeats.
@@ -194,9 +298,9 @@ async def ws_observations(
                 for t in pending:
                     t.cancel()
                 if get_task in done:
-                    obs = get_task.result()
+                    frame = get_task.result()
                     await websocket.send_json(
-                        {"type": "obs", "data": obs.model_dump(mode="json")}
+                        {"type": frame["kind"], "data": frame["data"]}
                     )
                 if receive_task in done:
                     msg = receive_task.result()

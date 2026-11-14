@@ -45,6 +45,16 @@ class Settings(BaseSettings):
     mqtt_obs_topic: str = "rid/v1/+/obs"
     mqtt_qos: int = Field(default=1, ge=0, le=2)
 
+    # ── Alert rules ─────────────────────────────────────────────────
+    # Altitude ceiling in metres.  None disables the rule.
+    alert_max_alt_m: float | None = 120.0
+    # Whether a drone broadcasting no operator ID raises an alert.
+    alert_unidentified: bool = True
+    # Re-alert interval for the same (drone, rule, zone).  A drone
+    # hovering in a no-fly zone emits 4 fixes/second; without this the
+    # panel is unusable within a minute.
+    alert_dedup_seconds: float = 120.0
+
     # ── Operational ────────────────────────────────────────────────
     log_level: str = "INFO"
     env: str = "dev"

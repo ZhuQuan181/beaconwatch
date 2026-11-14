@@ -71,6 +71,30 @@ class Station(BaseModel):
     online: bool = True
     last_seen: datetime | None = None
     firmware_version: str = ""
+    coverage_radius_m: float = 3000.0
+
+
+class GeofenceZoneOut(BaseModel):
+    """A no-fly volume, as the map and the rule engine both see it."""
+
+    zone_id: str
+    name: str
+    polygon: list[list[float]]
+    min_alt_m: float | None = None
+    max_alt_m: float | None = None
+    severity: str = "warn"
+
+
+class AlertOut(BaseModel):
+    """An alert event as returned by the API / pushed over WebSocket."""
+
+    alert_id: str
+    rule: str
+    severity: str
+    drone_id: str
+    message: str
+    detail: dict = {}
+    at: str = ""
 
 
 class DroneSummary(BaseModel):

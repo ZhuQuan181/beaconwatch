@@ -7,14 +7,17 @@
  * last 200 — old data is for the REST endpoint, not the live view.
  */
 import { useEffect, useRef, useState, useCallback } from "react";
-import type { DroneObservation, WsFrame } from "../types";
+import type { Alert, DroneObservation, WsFrame } from "../types";
 import { api } from "../api/client";
 
 const MAX_RETAIN = 200;
+const MAX_ALERTS = 100;
 
 export interface StreamState {
   /** Most-recent observations, newest first. */
   recent: DroneObservation[];
+  /** Most-recent alerts, newest first. */
+  alerts: Alert[];
   /** Cumulative count since the page was opened. */
   total: number;
   /** True when the WebSocket is open. */
@@ -28,6 +31,7 @@ export interface StreamState {
 export function useObservationsStream(wsUrl = "/ws/observations") {
   const [state, setState] = useState<StreamState>({
     recent: [],
+    alerts: [],
     total: 0,
     connected: false,
     error: null,
@@ -36,6 +40,26 @@ export function useObservationsStream(wsUrl = "/ws/observations") {
   const wsRef = useRef<WebSocket | null>(null);
   const backoffRef = useRef(500);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Alerts predate this page load.  Without the seed the panel is empty
+  // until the next offending fix arrives, which on a quiet feed looks
+  // like "no alerts" rather than "nothing new since you opened it".
+  useEffect(() => {
+    api
+      .listAlerts(50)
+      .then((rows) => {
+        if (!rows.length) return;
+        setState((s) => ({
+          ...s,
+          // Live frames arrive newest-first and are prepended, so the
+          // seed must be appended to keep ordering monotonic.
+          alerts: [...s.alerts, ...rows].slice(0, MAX_ALERTS),
+        }));
+      })
+      .catch(() => {
+        /* panel stays empty; live alerts still work */
+      });
+  }, []);
 
   const connect = useCallback(() => {
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -50,13 +74,31 @@ export function useObservationsStream(wsUrl = "/ws/observations") {
     ws.onmessage = (ev) => {
       try {
         const frame = JSON.parse(ev.data) as WsFrame;
-        if (frame.type !== "obs") return; // ignore ping
-        setState((s) => ({
-          ...s,
-          recent: [frame.data, ...s.recent].slice(0, MAX_RETAIN),
-          total: s.total + 1,
-          lastMessageAt: Date.now(),
-        }));
+        if (frame.type === "obs") {
+          setState((s) => ({
+            ...s,
+            recent: [frame.data, ...s.recent].slice(0, MAX_RETAIN),
+            total: s.total + 1,
+            lastMessageAt: Date.now(),
+          }));
+        } else if (frame.type === "alert") {
+          setState((s) => {
+            // The server dedups per (drone, rule, zone) in its own
+            // engine, but a reconnect or a seed can still hand us the
+            // same alert_id twice. Keying on the id keeps the panel
+            // count honest — a list that says "12" while rendering 19
+            // rows is worse than no counter at all.
+            const exists = s.alerts.some((a) => a.alert_id === frame.data.alert_id);
+            return {
+              ...s,
+              alerts: exists
+                ? s.alerts
+                : [frame.data, ...s.alerts].slice(0, MAX_ALERTS),
+              lastMessageAt: Date.now(),
+            };
+          });
+        }
+        // "ping" frames are ignored on purpose.
       } catch (e) {
         setState((s) => ({
           ...s,

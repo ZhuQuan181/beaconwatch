@@ -4,16 +4,17 @@ import { MapView } from "./components/MapView";
 import { ObservationList } from "./components/ObservationList";
 import { ConnectionBadge } from "./components/ConnectionBadge";
 import { Timeline } from "./components/Timeline";
+import { AlertPanel } from "./components/AlertPanel";
 import { useObservationsStream } from "./hooks/useObservationsStream";
 import { usePresence } from "./hooks/usePresence";
 import { api } from "./api/client";
-import type { DroneObservation } from "./types";
+import type { DroneObservation, GeofenceZone } from "./types";
 
 /** How far back the history buffer reaches, for the timeline window. */
 const HISTORY_LIMIT = 1000;
 
 export function App() {
-  const { recent, total, connected, error } = useObservationsStream();
+  const { recent, alerts, total, connected, error } = useObservationsStream();
   // Stations come from the presence registry (server is the source of
   // truth for which stations exist).  The per-station "online" dot is
   // derived from the `recent` stream — a station is only online if
@@ -35,6 +36,15 @@ export function App() {
   const [replayRows, setReplayRows] = useState<DroneObservation[]>([]);
   const [replayLoading, setReplayLoading] = useState(false);
   const [ghostIds, setGhostIds] = useState<string[]>([]);
+  const [zones, setZones] = useState<GeofenceZone[]>([]);
+
+  // Zones are static for a session; fetch once.
+  useEffect(() => {
+    api
+      .listZones()
+      .then(setZones)
+      .catch(() => setZones([]));
+  }, []);
 
   // Pull the history window once, and refresh it when the live stream
   // grows, so the scrubber's bounds track reality without a polling loop.
@@ -182,13 +192,21 @@ export function App() {
                   <span className={`dot ${s.online ? "online" : "offline"}`} />
                   {s.name || s.station_id}
                 </span>
-                <span className="dim">{s.station_id}</span>
+                <span className="dim">
+                  {(s.coverage_radius_m ?? 0) / 1000 > 0
+                    ? `${((s.coverage_radius_m ?? 0) / 1000).toFixed(1)} km`
+                    : s.station_id}
+                </span>
               </div>
             ))
           )}
         </div>
 
-        <div className="section" style={{ flex: 1, padding: 0 }}>
+        <div className="section section--alerts">
+          <AlertPanel alerts={alerts} onSelectDrone={setSelected} />
+        </div>
+
+        <div className="section" style={{ flex: 1, padding: 0, minHeight: 0 }}>
           <h2 style={{ padding: "12px 14px 8px" }}>
             {isReplay
               ? `Observations @ ${new Date(cursorTs as string).toLocaleTimeString("zh-CN", { hour12: false })}`
@@ -217,6 +235,7 @@ export function App() {
       <MapView
         stations={stations}
         observations={displayed}
+        zones={zones}
         onDroneClick={handleDroneClick}
       />
 

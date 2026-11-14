@@ -51,9 +51,35 @@ export interface Station {
   online: boolean;
   last_seen?: string | null;
   firmware_version: string;
+  /** Receiver reach in metres — drawn as a circle on the map. */
+  coverage_radius_m?: number;
+}
+
+/** A no-fly volume; the map draws it and the rules test against it. */
+export interface GeofenceZone {
+  zone_id: string;
+  name: string;
+  /** Ordered [lon, lat] ring, implicitly closed. */
+  polygon: [number, number][];
+  min_alt_m?: number | null;
+  max_alt_m?: number | null;
+  severity: "info" | "warn" | "critical" | string;
+}
+
+export type AlertRule = "geofence" | "altitude" | "unidentified";
+
+export interface Alert {
+  alert_id: string;
+  rule: AlertRule | string;
+  severity: "info" | "warn" | "critical" | string;
+  drone_id: string;
+  message: string;
+  detail: Record<string, unknown>;
+  at: string;
 }
 
 /** Frame sent by the server over /ws/observations. */
 export type WsFrame =
   | { type: "obs"; data: DroneObservation }
+  | { type: "alert"; data: Alert }
   | { type: "ping" };

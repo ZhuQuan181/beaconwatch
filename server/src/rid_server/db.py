@@ -57,6 +57,12 @@ class Station(Base):
     online: Mapped[bool] = mapped_column(default=True)
     last_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     firmware_version: Mapped[str] = mapped_column(String(32), default="")
+    # Receiver reach in metres.  Drives the coverage circle on the map
+    # and lets an operator see gaps between sites.  Default matches the
+    # 1-5 km envelope typical of a Wi-Fi/BLE RID receiver.
+    coverage_radius_m: Mapped[float] = mapped_column(
+        Float, nullable=False, default=3000.0, server_default="3000"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -64,6 +70,31 @@ class Station(Base):
     # Spatial index: stations are mostly read by location
     __table_args__ = (
         Index("ix_stations_geom", "lat", "lon"),
+    )
+
+
+class GeofenceZone(Base):
+    """A no-fly / restricted volume that triggers alerts.
+
+    Stored as an ordered [lon, lat] ring so the API, the rule engine and
+    the map all consume identical geometry — a config file plus a DB row
+    would drift, and then the red box on screen wouldn't match the alert.
+    """
+
+    __tablename__ = "geofence_zones"
+
+    zone_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    polygon: Mapped[list] = mapped_column(
+        JSONB().with_variant(JSON(), "sqlite"), nullable=False
+    )
+    min_alt_m: Mapped[float | None] = mapped_column(Float)
+    max_alt_m: Mapped[float | None] = mapped_column(Float)
+    severity: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="warn", server_default="warn"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
     )
 
 

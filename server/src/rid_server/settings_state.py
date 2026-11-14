@@ -14,14 +14,24 @@ from .mqtt_subscriber import MqttSubscriber
 
 
 def set_subscriber_bus_hook(
-    subscriber: MqttSubscriber, bus: ObservationBus
+    subscriber: MqttSubscriber, bus: ObservationBus, ring=None
 ) -> None:
-    """Attach a publish callback that the subscriber invokes per message.
+    """Attach publish callbacks that the subscriber invokes per message.
 
-    Kept as a free function (not a method on the subscriber) so the
+    Kept as free functions (not methods on the subscriber) so the
     subscriber itself remains unaware of the bus in tests.
+
+    Both streams share one bus: a client needs them in arrival order, and
+    a separate alert channel would let an alert overtake the observation
+    that triggered it.
     """
     async def _on_persisted(obs) -> None:  # type: ignore[no-untyped-def]
         await bus.publish(obs)
 
+    async def _on_alert(alert) -> None:  # type: ignore[no-untyped-def]
+        if ring is not None:
+            ring.add(alert)
+        await bus.publish_alert(alert)
+
     subscriber.on_persisted = _on_persisted
+    subscriber.on_alert = _on_alert

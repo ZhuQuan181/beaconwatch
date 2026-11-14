@@ -142,7 +142,7 @@ async def write_observation(
             speed_mps=obs.position.speed_mps,
             heading_deg=obs.position.heading_deg,
             rssi_dbm=obs.rssi_dbm,
-            self_id=obs.self_id,
+            self_id=obs.self_id or "",
             operator_id=obs.operator_id,
             raw=obs.model_dump(mode="json"),
         )

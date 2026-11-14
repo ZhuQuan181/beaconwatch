@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 
 from fastapi import FastAPI
 
+from .alerts import AlertEngine, AlertRing
 from .bus import ObservationBus
 from .config import get_settings
 from .db import dispose_engine
@@ -29,9 +30,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     subscriber = MqttSubscriber(settings)
     app.state.subscriber = subscriber
+    # Rules run after each committed observation.  Constructing the
+    # engine here (not per message) keeps dedup state across messages —
+    # a hovering drone would otherwise re-alert at 4 Hz.
+    app.state.alerts = AlertRing(capacity=200)
+    engine = AlertEngine(
+        max_alt_m=settings.alert_max_alt_m,
+        unidentified=settings.alert_unidentified,
+        dedup_seconds=settings.alert_dedup_seconds,
+    )
+    subscriber.alerts = engine
     # Wire the bus into the subscriber so persisted observations
     # fan out to WebSocket clients in real time.
-    set_subscriber_bus_hook(subscriber, bus)
+    set_subscriber_bus_hook(subscriber, bus, app.state.alerts)
     await subscriber.start()
     try:
         yield

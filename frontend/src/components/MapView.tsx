@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import maplibregl, { type Map as MlMap, type GeoJSONSource } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
-import type { DroneObservation, Station } from "../types";
+import type { DroneObservation, GeofenceZone, Station } from "../types";
 
 /**
  * MapView — renders stations + live observations on a MapLibre canvas.
@@ -29,6 +29,7 @@ import type { DroneObservation, Station } from "../types";
 interface Props {
   stations: Station[];
   observations: DroneObservation[];
+  zones?: GeofenceZone[];
   onDroneClick?: (droneId: string) => void;
 }
 
@@ -60,6 +61,54 @@ function stationsToGeoJSON(stations: Station[]): GeoJSON.FeatureCollection {
   };
 }
 
+/** Closed rings for the coverage circles, in metres → degrees. */
+function coverageToGeoJSON(stations: Station[]): GeoJSON.FeatureCollection {
+  const features: GeoJSON.Feature[] = [];
+  for (const s of stations) {
+    const radius = s.coverage_radius_m ?? 3000;
+    const coords: [number, number][] = [];
+    // 64 segments is plenty at these radii; more just costs CPU.
+    for (let i = 0; i <= 64; i++) {
+      const theta = (i / 64) * Math.PI * 2;
+      const dLat = (radius * Math.cos(theta)) / 111320;
+      const dLon =
+        (radius * Math.sin(theta)) /
+        (111320 * Math.cos((s.lat * Math.PI) / 180) || 1);
+      coords.push([s.lon + dLon, s.lat + dLat]);
+    }
+    features.push({
+      type: "Feature",
+      geometry: { type: "Polygon", coordinates: [coords] },
+      properties: { station_id: s.station_id, online: s.online, radius },
+    });
+  }
+  return { type: "FeatureCollection", features };
+}
+
+/** Geofence rings. The stored ring has no closing point; GeoJSON wants one. */
+function zonesToGeoJSON(zones: GeofenceZone[]): GeoJSON.FeatureCollection {
+  return {
+    type: "FeatureCollection",
+    features: zones
+      .filter((z) => Array.isArray(z.polygon) && z.polygon.length >= 3)
+      .map((z) => {
+        const ring = [...z.polygon];
+        const [fx, fy] = ring[0];
+        const [lx, ly] = ring[ring.length - 1];
+        if (fx !== lx || fy !== ly) ring.push([fx, fy]);
+        return {
+          type: "Feature" as const,
+          geometry: { type: "Polygon" as const, coordinates: [ring] },
+          properties: {
+            zone_id: z.zone_id,
+            name: z.name,
+            severity: z.severity,
+          },
+        };
+      }),
+  };
+}
+
 function observationsToGeoJSON(obs: DroneObservation[]): GeoJSON.FeatureCollection {
   return {
     type: "FeatureCollection",
@@ -72,6 +121,9 @@ function observationsToGeoJSON(obs: DroneObservation[]): GeoJSON.FeatureCollecti
         protocol: o.protocol,
         alt_m: o.position.alt_m,
         received_at: o.received_at,
+        // A drone with no operator ID is the interesting one; bake it
+        // into the feature so the paint expression can style it.
+        unidentified: !o.operator_id,
       },
     })),
   };
@@ -89,17 +141,27 @@ function distMeters(a: [number, number], b: [number, number]): number {
   return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
 }
 
-/**
- * One LineString per drone per *continuous* segment.
+/** One LineString per drone per *continuous* segment.
  *
  * Real tracks have gaps — the drone leaves radio range, the station
  * hands off, the route wraps. Drawing a straight line across a gap
  * invents a flight path that never happened and makes a slow survey
  * drone look like it teleported 3 km. So we split whenever consecutive
  * fixes are too far apart or too far apart in time.
+ *
+ * Thresholds are derived from the data, not hardcoded: the reported
+ * interval and the drone's own speed decide what "too far" means.  A
+ * fixed 400 m / 45 s pair broke on a 12 s feed where 14 m/s transit
+ * legitimately covers 170 m per fix, and every segment got severed —
+ * producing one long vertical line across the map instead of a track.
+ *
+ * Colour is baked into the feature (not the layer paint) so a ghost
+ * drone's track burns red like its dot does — a red dot riding a cyan
+ * trail is the kind of detail that makes an operator distrust the map.
  */
-const MAX_GAP_M = 400;
-const MAX_GAP_S = 45;
+const MIN_GAP_M = 500;   // floor: below this is sensor noise, not a gap
+const GAP_SPEED_FACTOR = 3;  // a gap is >3× the drone's own step distance
+const MIN_GAP_S = 120;   // floor: 2 min of silence is a real gap
 
 function trailsToGeoJSON(obs: DroneObservation[]): GeoJSON.FeatureCollection {
   const byDrone = new Map<string, DroneObservation[]>();
@@ -115,25 +177,58 @@ function trailsToGeoJSON(obs: DroneObservation[]): GeoJSON.FeatureCollection {
     const pts = [...rows].reverse().map((o) => ({
       coord: [o.position.lon, o.position.lat] as [number, number],
       t: Date.parse(o.received_at) || 0,
+      unidentified: !o.operator_id,
     }));
     let seg: [number, number][] = [pts[0].coord];
+    let segGhost = pts[0].unidentified;
+
+    // Characterise this track's own cadence so the gap thresholds scale
+    // with the feed instead of assuming a fixed reporting rate.
+    const stepSamples: number[] = [];
+    const distSamples: number[] = [];
+    for (let k = 1; k < pts.length; k++) {
+      stepSamples.push(Math.abs(pts[k].t - pts[k - 1].t) / 1000);
+      distSamples.push(distMeters(pts[k - 1].coord, pts[k].coord));
+    }
+    const median = (xs: number[]) => {
+      if (!xs.length) return 0;
+      const s = [...xs].sort((a, b) => a - b);
+      return s[Math.floor(s.length / 2)];
+    };
+    const medianStep = median(stepSamples);
+    const medianStepM = median(distSamples);
     const flush = () => {
       if (seg.length >= 2) {
         features.push({
           type: "Feature",
           geometry: { type: "LineString", coordinates: seg },
-          properties: { drone_id: droneId },
+          properties: { drone_id: droneId, unidentified: segGhost },
         });
       }
     };
     for (let k = 1; k < pts.length; k++) {
       const prev = pts[k - 1];
       const cur = pts[k];
-      const tooFar = distMeters(prev.coord, cur.coord) > MAX_GAP_M;
-      const tooLate = Math.abs(cur.t - prev.t) > MAX_GAP_S * 1000;
-      if (tooFar || tooLate) {
+      const stepM = distMeters(prev.coord, cur.coord);
+      const stepS = Math.abs(cur.t - prev.t) / 1000;
+
+      // Compare this hop against the track's own typical hop, so a fast
+      // transit doesn't look like a gap. Fall back to floors when there
+      // aren't enough points to characterise the track yet.
+      const gapS = Math.max(MIN_GAP_S, medianStep * GAP_SPEED_FACTOR * 1.5);
+      const gapM = Math.max(
+        MIN_GAP_M,
+        (medianStepM || 0) * GAP_SPEED_FACTOR,
+      );
+      const tooFar = stepM > gapM;
+      const tooLate = stepS > gapS;
+      // A change in identifiability also breaks the track: the drone
+      // either started broadcasting or stopped, and that's information.
+      const identityChanged = cur.unidentified !== segGhost;
+      if (tooFar || tooLate || identityChanged) {
         flush();
         seg = [cur.coord];
+        segGhost = cur.unidentified;
       } else {
         seg.push(cur.coord);
       }
@@ -143,7 +238,7 @@ function trailsToGeoJSON(obs: DroneObservation[]): GeoJSON.FeatureCollection {
   return { type: "FeatureCollection", features };
 }
 
-export function MapView({ stations, observations, onDroneClick }: Props) {
+export function MapView({ stations, observations, zones = [], onDroneClick }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MlMap | null>(null);
   const fittedRef = useRef(false);
@@ -173,6 +268,92 @@ export function MapView({ stations, observations, onDroneClick }: Props) {
     });
     map.addControl(new maplibregl.NavigationControl(), "top-right");
     map.on("load", () => {
+      // ── Layer order (bottom → top) ──────────────────────────────
+      // coverage → geofence → trails → drones
+      // Context first, targets last: a donut of coverage circles must
+      // never obscure the dot an operator is trying to click.
+      map.addSource("coverage", {
+        type: "geojson",
+        data: coverageToGeoJSON([]),
+      });
+      map.addLayer({
+        id: "coverage-fill",
+        type: "fill",
+        source: "coverage",
+        paint: {
+          "fill-color": "#5cc8ff",
+          "fill-opacity": 0.05,
+        },
+      });
+      map.addLayer({
+        id: "coverage-outline",
+        type: "line",
+        source: "coverage",
+        paint: {
+          "line-color": "#5cc8ff",
+          "line-width": 1.2,
+          // 0.28 was invisible against the dark basemap; 0.5 reads as a
+          // deliberate boundary without competing with the geofence.
+          "line-opacity": 0.5,
+          "line-dasharray": [2, 2],
+        },
+      });
+
+      map.addSource("zones", {
+        type: "geojson",
+        data: zonesToGeoJSON([]),
+      });
+      map.addLayer({
+        id: "zones-fill",
+        type: "fill",
+        source: "zones",
+        paint: {
+          // Severity drives colour so a critical zone reads as hotter
+          // without needing a legend.
+          "fill-color": [
+            "match",
+            ["get", "severity"],
+            "critical", "#ff3b30",
+            "warn", "#f0b429",
+            "#8a94a6",
+          ],
+          "fill-opacity": 0.14,
+        },
+      });
+      map.addLayer({
+        id: "zones-outline",
+        type: "line",
+        source: "zones",
+        paint: {
+          "line-color": [
+            "match",
+            ["get", "severity"],
+            "critical", "#ff3b30",
+            "warn", "#f0b429",
+            "#8a94a6",
+          ],
+          "line-width": 1.6,
+          "line-opacity": 0.9,
+        },
+      });
+      // Zone names sit on the polygon so an operator can say "it's in
+      // the airport zone" without opening a panel.
+      map.addLayer({
+        id: "zones-label",
+        type: "symbol",
+        source: "zones",
+        layout: {
+          "text-field": ["get", "name"],
+          "text-size": 11,
+          "text-anchor": "top",
+        },
+        paint: {
+          "text-color": "#f0b429",
+          "text-halo-color": "#0b0d12",
+          "text-halo-width": 1.4,
+        },
+      });
+
       map.addSource("stations", {
         type: "geojson",
         data: stationsToGeoJSON([]),
@@ -198,9 +379,20 @@ export function MapView({ stations, observations, onDroneClick }: Props) {
         source: "trails",
         layout: { "line-join": "round", "line-cap": "round" },
         paint: {
-          "line-color": "#ff5c5c",
-          "line-width": 1.5,
-          "line-opacity": 0.45,
+          // Same colour logic as the dots: cooperative traffic cyan,
+          // ghost traffic red. One visual language for one fact.
+          "line-color": [
+            "case",
+            ["get", "unidentified"], "#ff3b30", "#5cc8ff",
+          ],
+          "line-width": [
+            "case",
+            ["get", "unidentified"], 2.0, 1.5,
+          ],
+          "line-opacity": [
+            "case",
+            ["get", "unidentified"], 0.75, 0.45,
+          ],
         },
       });
       map.addSource("drones", {
@@ -212,10 +404,19 @@ export function MapView({ stations, observations, onDroneClick }: Props) {
         type: "circle",
         source: "drones",
         paint: {
-          "circle-radius": 5,
-          "circle-color": "#ff5c5c",
+          // Ghost drones (no operator ID) burn red; cooperative traffic
+          // stays cyan. The colour is the whole story: the operator
+          // doesn't read the sidebar to decide what to look at.
+          "circle-radius": [
+            "case",
+            ["get", "unidentified"], 7, 5,
+          ],
+          "circle-color": [
+            "case",
+            ["get", "unidentified"], "#ff3b30", "#5cc8ff",
+          ],
           "circle-stroke-width": 1.5,
-          "circle-stroke-color": "#fff",
+          "circle-stroke-color": "#0b0d12",
         },
       });
       map.on("click", "drones-dot", (e) => {
@@ -248,10 +449,25 @@ export function MapView({ stations, observations, onDroneClick }: Props) {
     const apply = () => {
       const src = m.getSource("stations") as GeoJSONSource | undefined;
       src?.setData(stationsToGeoJSON(stations));
+      const cov = m.getSource("coverage") as GeoJSONSource | undefined;
+      cov?.setData(coverageToGeoJSON(stations));
     };
     if (m.isStyleLoaded()) apply();
     else m.once("load", apply);
   }, [stations]);
+
+  // Push geofence zones.  Separate from stations because zones change
+  // far less often — an operator draws one and leaves it alone.
+  useEffect(() => {
+    const m = mapRef.current;
+    if (!m) return;
+    const apply = () => {
+      const src = m.getSource("zones") as GeoJSONSource | undefined;
+      src?.setData(zonesToGeoJSON(zones));
+    };
+    if (m.isStyleLoaded()) apply();
+    else m.once("load", apply);
+  }, [zones]);
 
   // Push observations + auto-fit on first.
   useEffect(() => {
@@ -263,21 +479,42 @@ export function MapView({ stations, observations, onDroneClick }: Props) {
       const trailSrc = m.getSource("trails") as GeoJSONSource | undefined;
       trailSrc?.setData(trailsToGeoJSON(observations));
       if (!fittedRef.current) {
-        // Fit to the latest 20 observations.
-        const pts = observations.slice(0, 20);
-        const lons = pts.map((o) => o.position.lon);
-        const lats = pts.map((o) => o.position.lat);
+        // Fit to everything the operator must see at once: the drones,
+        // the restricted volumes, and the stations.  Fitting to drones
+        // alone pushed an alerted zone off the edge of the screen — an
+        // alert pointing at something invisible is worse than no alert.
+        const lons: number[] = [];
+        const lats: number[] = [];
+        for (const o of observations.slice(0, 20)) {
+          lons.push(o.position.lon);
+          lats.push(o.position.lat);
+        }
+        for (const z of zones) {
+          for (const [zLon, zLat] of z.polygon ?? []) {
+            lons.push(zLon);
+            lats.push(zLat);
+          }
+        }
+        for (const s of stations) {
+          lons.push(s.lon);
+          lats.push(s.lat);
+        }
+        if (lons.length === 0) return;
         const bounds: [[number, number], [number, number]] = [
           [Math.min(...lons), Math.min(...lats)],
           [Math.max(...lons), Math.max(...lats)],
         ];
-        m.fitBounds(bounds, { padding: 60, duration: 800, maxZoom: 14 });
+        // maxZoom 13 rather than 14: at 14 the ~2 km coverage rings
+        // extend past the viewport and read as stray arcs instead of
+        // circles.  One zoom level out and the deployment geometry
+        // (which station covers which zone) is legible.
+        m.fitBounds(bounds, { padding: 70, duration: 800, maxZoom: 13 });
         fittedRef.current = true;
       }
     };
     if (m.isStyleLoaded()) apply();
     else m.once("load", apply);
-  }, [observations]);
+  }, [observations, zones, stations]);
 
   return <div ref={containerRef} className="map-container" />;
 }
