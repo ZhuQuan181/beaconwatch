@@ -45,9 +45,13 @@ def test_observation_round_trip_json():
         protocol=Protocol.ASTM_F3411,
         station_id="station-01",
         rssi_dbm=-65,
-        position=Position(lat=37.7749, lon=-122.4194, alt_m=120.0),
-        speed_mps=15.5,
-        heading_deg=90.0,
+        position=Position(
+            lat=37.7749,
+            lon=-122.4194,
+            alt_m=120.0,
+            speed_mps=15.5,
+            heading_deg=90.0,
+        ),
         drone_timestamp=datetime(2026, 6, 6, 12, 0, 0, tzinfo=timezone.utc),
         self_id="survey mission",
     )

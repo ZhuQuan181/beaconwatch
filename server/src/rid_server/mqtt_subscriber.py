@@ -158,9 +158,16 @@ class MqttSubscriber:
 
         Returns None on malformed topics (rather than raising) so a
         single bad publisher can't kill the subscriber.
+
+        The version segment is deliberately not pinned to ``v1``: the
+        e2e harness runs a second subscriber against ``rid/v2/...`` to
+        stay off the production topic, and hard-coding the version here
+        made every such message arrive with ``station_id=None``.
         """
         parts = topic.split("/")
-        # expected: ['rid', 'v1', '<station_id>', 'obs']
-        if len(parts) != 4 or parts[0] != "rid" or parts[1] != "v1":
+        # expected: ['rid', '<version>', '<station_id>', 'obs']
+        if len(parts) != 4 or parts[0] != "rid":
+            return None
+        if not parts[1].startswith("v"):
             return None
         return parts[2]

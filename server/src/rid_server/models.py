@@ -41,10 +41,20 @@ class DroneObservation(BaseModel):
     protocol: Literal[
         "wifi_nan", "ble", "wifi_beacon", "astm_f3411", "unknown"
     ]
+    rssi_dbm: int | None = Field(
+        default=None,
+        ge=-150,
+        le=0,
+        description="Signal strength at the receiving station (dBm)",
+    )
     position: Position
     drone_timestamp: datetime | None
     received_at: datetime
-    self_id: str = ""
+    self_id: str | None = Field(
+        default="",
+        description="Free-text self-ID; the edge sends null when the drone "
+        "broadcasts no Self-ID message, so this must accept None.",
+    )
     operator_location: Position | None = None
 
 

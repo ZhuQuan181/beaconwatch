@@ -28,12 +28,28 @@ async def test_extract_station_id_valid():
     assert MqttSubscriber._extract_station_id("rid/v1/abc/obs") == "abc"
 
 
+async def test_extract_station_id_accepts_other_versions():
+    """Topic version must not be pinned to v1.
+
+    The e2e harness runs a second subscriber on rid/v2-<run>/+/obs so
+    it doesn't collide with a long-lived production subscriber on the
+    same topic.  When this method hard-coded "v1", every message on the
+    private topic arrived with station_id=None and was filed under the
+    wrong station.
+    """
+    assert MqttSubscriber._extract_station_id("rid/v2/drone-lab/obs") == "drone-lab"
+    assert MqttSubscriber._extract_station_id("rid/v2-abc123/lab/obs") == "lab"
+    assert MqttSubscriber._extract_station_id("rid/v10/x/obs") == "x"
+
+
 async def test_extract_station_id_invalid():
     # Wrong number of segments
     assert MqttSubscriber._extract_station_id("rid/v1/obs") is None
-    assert MqttSubscriber._extract_station_id("rid/v2/station/obs") is None
     assert MqttSubscriber._extract_station_id("") is None
     assert MqttSubscriber._extract_station_id("not/a/topic") is None
+    # Unversioned topic — the segment after "rid" must look like a version.
+    assert MqttSubscriber._extract_station_id("rid/station/obs") is None
+    assert MqttSubscriber._extract_station_id("other/v1/station/obs") is None
 
 
 async def test_handle_message_persists_and_counts(db_engine, _sqlite_settings):

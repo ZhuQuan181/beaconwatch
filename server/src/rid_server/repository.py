@@ -141,6 +141,7 @@ async def write_observation(
             position_alt_m=obs.position.alt_m,
             speed_mps=obs.position.speed_mps,
             heading_deg=obs.position.heading_deg,
+            rssi_dbm=obs.rssi_dbm,
             self_id=obs.self_id,
             operator_id=obs.operator_id,
             raw=obs.model_dump(mode="json"),
@@ -170,10 +171,19 @@ async def list_observations(
     station_id: str | None = None,
     bbox: tuple[float, float, float, float] | None = None,
     since: datetime | None = None,
+    until: datetime | None = None,
+    unidentified_only: bool = False,
 ) -> Sequence[Observation]:
     """Filtered, time-ordered (newest first) observation listing.
 
     Filters compose with AND.  ``bbox`` is ``(min_lon, min_lat, max_lon, max_lat)``.
+
+    ``since``/``until`` are an absolute window, which is what a
+    timeline scrubber needs.  ``since_seconds`` relative queries can't
+    express "show me 14:32:10 to 14:35:00 yesterday".
+
+    ``unidentified_only`` keeps only rows with no operator ID — the
+    "find the ghost drone" view.
     """
     stmt = select(Observation).order_by(Observation.received_at.desc())
     if drone_id is not None:
@@ -182,6 +192,10 @@ async def list_observations(
         stmt = stmt.where(Observation.station_id == station_id)
     if since is not None:
         stmt = stmt.where(Observation.received_at >= since)
+    if until is not None:
+        stmt = stmt.where(Observation.received_at <= until)
+    if unidentified_only:
+        stmt = stmt.where(Observation.operator_id.is_(None))
     if bbox is not None:
         min_lon, min_lat, max_lon, max_lat = bbox
         stmt = stmt.where(
@@ -193,6 +207,29 @@ async def list_observations(
     stmt = stmt.limit(limit).offset(offset)
     result = await session.execute(stmt)
     return result.scalars().all()
+
+
+async def list_unidentified_drones(
+    session: AsyncSession,
+    *,
+    since: datetime | None = None,
+) -> Sequence[str]:
+    """Distinct drone IDs that never broadcast an operator ID.
+
+    These are the interesting ones for a RID deployment: a drone that
+    transmits a UAS ID but no operator ID is either non-compliant or
+    privacy-mode, and either way it's the thing an operator should look
+    at first.
+    """
+    stmt = (
+        select(Observation.drone_id)
+        .where(Observation.operator_id.is_(None))
+        .distinct()
+    )
+    if since is not None:
+        stmt = stmt.where(Observation.received_at >= since)
+    result = await session.execute(stmt)
+    return [r[0] for r in result.all()]
 
 
 async def list_drones(

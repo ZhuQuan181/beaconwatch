@@ -121,6 +121,10 @@ class Observation(Base):
     position_alt_m: Mapped[float] = mapped_column(Float, nullable=False)
     speed_mps: Mapped[float] = mapped_column(Float, default=0.0)
     heading_deg: Mapped[float] = mapped_column(Float, default=0.0)
+    # Signal strength at the receiving station.  The edge has always
+    # captured this; it used to be dropped on ingest, which made
+    # "which station hears this drone best" unanswerable.
+    rssi_dbm: Mapped[int | None] = mapped_column(Integer)
     self_id: Mapped[str] = mapped_column(String(256), default="")
     operator_id: Mapped[str | None] = mapped_column(String(64))
     # JSONB on PostgreSQL, JSON on SQLite (tests).

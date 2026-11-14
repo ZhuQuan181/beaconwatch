@@ -121,6 +121,7 @@ def make_obs(
     alt_m: float = 120.0,
     protocol: str = "wifi_nan",
     received_at: datetime | None = None,
+    rssi_dbm: int | None = -62,
 ) -> dict[str, Any]:
     if received_at is None:
         received_at = datetime.now(timezone.utc)
@@ -130,6 +131,7 @@ def make_obs(
         "operator_id": None,
         "station_id": station_id,
         "protocol": protocol,
+        "rssi_dbm": rssi_dbm,
         "position": {
             "lat": lat,
             "lon": lon,

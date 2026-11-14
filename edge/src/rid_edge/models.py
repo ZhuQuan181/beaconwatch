@@ -25,6 +25,11 @@ class Position(BaseModel):
     """WGS-84 geodetic position.
 
     Altitude is HAE (Height Above Ellipsoid), per ASTM F3411 convention.
+
+    Motion fields live here, not on the observation, because ASTM F3411
+    carries them in the Location message — and because the server's
+    ``Position`` requires them, so putting them anywhere else makes the
+    message unparseable at the far end.  See tests/test_wire_contract.py.
     """
 
     model_config = ConfigDict(frozen=False)
@@ -40,6 +45,23 @@ class Position(BaseModel):
         default=10.0,
         ge=0.0,
         description="Horizontal accuracy (1-sigma, meters)",
+    )
+    accuracy_v_m: float = Field(
+        default=15.0,
+        ge=0.0,
+        description="Vertical accuracy (1-sigma, meters)",
+    )
+    speed_mps: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=500.0,
+        description="Ground speed in m/s (ASTM Speed field)",
+    )
+    heading_deg: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=360.0,
+        description="Direction of travel in degrees true north",
     )
 
     @field_validator("lat", "lon")
@@ -85,12 +107,17 @@ class RidObservation(BaseModel):
         max_length=64,
         description="Edge station (industrial PC) ID",
     )
-    rssi_dbm: int = Field(ge=-150, le=0)
+    rssi_dbm: int = Field(
+        ge=-150,
+        le=0,
+        description="Received signal strength at the edge receiver",
+    )
 
     # ---- Geometry ----
+    # Speed and heading are NOT duplicated here — they live in Position,
+    # matching both ASTM F3411 (they're Location fields) and the server
+    # schema.  See tests/test_wire_contract.py.
     position: Position
-    speed_mps: float = Field(default=0.0, ge=0.0, le=200.0)
-    heading_deg: float = Field(default=0.0, ge=0.0, lt=360.0)
 
     # ---- Provenance ----
     drone_timestamp: datetime = Field(

@@ -27,6 +27,7 @@ from .repository import (
     list_drones,
     list_observations,
     list_stations,
+    list_unidentified_drones,
 )
 
 router = APIRouter()
@@ -64,6 +65,26 @@ async def get_drones(
     return [drone_to_summary(r) for r in rows]
 
 
+@router.get("/drones/unidentified", response_model=list[str])
+async def get_unidentified_drones(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    since_seconds: Annotated[int | None, Query(ge=0, le=86400)] = None,
+) -> list[str]:
+    """Drone IDs seen without an operator ID — the non-compliant set.
+
+    Declared BEFORE ``/drones/{drone_id}`` on purpose: FastAPI matches
+    routes in declaration order, so a literal path registered after a
+    parameterised one is unreachable — "unidentified" would be captured
+    as a drone_id and 404 instead.
+    """
+    since = (
+        datetime.now(timezone.utc) - timedelta(seconds=since_seconds)
+        if since_seconds is not None
+        else None
+    )
+    return list(await list_unidentified_drones(session, since=since))
+
+
 @router.get("/drones/{drone_id}", response_model=DroneSummary)
 async def get_drone_by_id(
     drone_id: str,
@@ -91,6 +112,18 @@ async def get_observations(
         ),
     ] = None,
     since_seconds: Annotated[int | None, Query(ge=0, le=86400)] = None,
+    from_: Annotated[
+        datetime | None,
+        Query(alias="from", description="Absolute window start (ISO 8601, inclusive)"),
+    ] = None,
+    to: Annotated[
+        datetime | None,
+        Query(description="Absolute window end (ISO 8601, inclusive)"),
+    ] = None,
+    unidentified_only: Annotated[
+        bool,
+        Query(description="Only drones that broadcast no operator ID"),
+    ] = False,
 ) -> list[DroneObservation]:
     parsed_bbox: tuple[float, float, float, float] | None = None
     if bbox is not None:
@@ -100,9 +133,16 @@ async def get_observations(
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST, detail=f"invalid bbox: {e}"
             ) from e
+    if from_ is not None and to is not None and from_ > to:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail="'from' must be earlier than 'to'",
+        )
     since: datetime | None = None
     if since_seconds is not None:
         since = datetime.now(timezone.utc) - timedelta(seconds=since_seconds)
+    elif from_ is not None:
+        since = from_
     rows = await list_observations(
         session,
         limit=limit,
@@ -111,6 +151,8 @@ async def get_observations(
         station_id=station_id,
         bbox=parsed_bbox,
         since=since,
+        until=to,
+        unidentified_only=unidentified_only,
     )
     return [_row_to_observation(r) for r in rows]
 
@@ -169,28 +211,6 @@ async def ws_observations(
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
-def _row_to_observation(r) -> DroneObservation:
-    return DroneObservation(
-        observation_id=r.observation_id,
-        drone_id=r.drone_id,
-        operator_id=r.operator_id,
-        station_id=r.station_id,
-        protocol=r.protocol,
-        position=Position(
-            lat=r.position_lat,
-            lon=r.position_lon,
-            alt_m=r.position_alt_m,
-            accuracy_h_m=0.0,
-            accuracy_v_m=0.0,
-            speed_mps=r.speed_mps,
-            heading_deg=r.heading_deg,
-        ),
-        drone_timestamp=r.drone_timestamp,
-        received_at=r.received_at,
-        self_id=r.self_id or "",
-    )
-
-
 # Known route prefixes (for the 404 hint).  We don't introspect the
 # router here because that would couple routes.py to a specific
 # FastAPI version, and a hand-maintained list is easier to audit.
@@ -214,6 +234,7 @@ def _row_to_observation(r) -> DroneObservation:
         operator_id=r.operator_id,
         station_id=r.station_id,
         protocol=r.protocol,
+        rssi_dbm=r.rssi_dbm,
         position=Position(
             lat=r.position_lat,
             lon=r.position_lon,

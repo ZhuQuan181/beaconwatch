@@ -131,15 +131,14 @@ def _build_observation(
             lon=loc.longitude_deg,
             alt_m=loc.altitude_geodetic_m,
             accuracy_h_m=loc.horiz_accuracy_m,
+            accuracy_v_m=loc.vert_accuracy_m,
+            speed_mps=max(0.0, loc.speed_horizontal_mps),
+            heading_deg=loc.direction_deg % 360.0,
         )
-        speed = max(0.0, loc.speed_horizontal_mps)
-        heading = loc.direction_deg % 360.0
     else:
         # No Location in this frame — use the station's location with
         # a very large accuracy so the server knows it's a placeholder.
         position = Position(lat=0.0, lon=0.0, alt_m=0.0, accuracy_h_m=1e6)
-        speed = 0.0
-        heading = 0.0
 
     protocol = (
         Protocol.WIFI_NAN if raw.bearer == Bearer.WIFI_NAN else Protocol.ASTM_F3411
@@ -153,8 +152,6 @@ def _build_observation(
         station_id="unknown-station",  # placeholder; PipelineManager overwrites
         rssi_dbm=raw.rssi_dbm,
         position=position,
-        speed_mps=speed,
-        heading_deg=heading,
         drone_timestamp=raw.timestamp,
         received_at=datetime.now(timezone.utc),
         operator_location=None,

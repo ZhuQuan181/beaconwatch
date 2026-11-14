@@ -177,3 +177,29 @@ async def test_list_drones_filters_by_recent(session: AsyncSession):
     ids = {d.drone_id for d in rows}
     assert "fresh" in ids
     assert "stale" not in ids
+
+
+async def test_rssi_is_persisted_and_read_back(session: AsyncSession):
+    """RSSI used to be dropped on ingest.
+
+    The edge always captured it, but the server had no column, so
+    "which station hears this drone best" was unanswerable after the
+    fact.  This pins the round trip.
+    """
+    obs = _obs_model(rssi_dbm=-71)
+    await touch_station(session, obs.station_id, online=True)
+    await write_observation(session, obs)
+
+    rows = await list_observations(session, limit=10)
+    assert len(rows) == 1
+    assert rows[0].rssi_dbm == -71
+
+
+async def test_null_rssi_is_allowed(session: AsyncSession):
+    """Old rows and third-party publishers may omit RSSI."""
+    obs = _obs_model(rssi_dbm=None)
+    await touch_station(session, obs.station_id, online=True)
+    await write_observation(session, obs)
+
+    rows = await list_observations(session, limit=10)
+    assert rows[0].rssi_dbm is None
