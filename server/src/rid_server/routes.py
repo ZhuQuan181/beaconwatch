@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
@@ -12,6 +13,7 @@ from fastapi import (
     HTTPException,
     Query,
     Request,
+    Response,
     WebSocket,
     WebSocketDisconnect,
     status,
@@ -20,15 +22,19 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .bus import ObservationBus
-from .db import GeofenceZone, get_session
+from .config import get_settings
+from .db import GeofenceZone, Observation, get_session
+from .logging_setup import get_logger
 from .models import (
     AlertOut,
     DroneObservation,
     DroneSummary,
     GeofenceZoneOut,
+    ObservationPage,
     Position,
     Station,
 )
+from .pagination import decode_cursor, encode_cursor
 from .repository import (
     drone_to_summary,
     get_drone,
@@ -37,8 +43,12 @@ from .repository import (
     list_stations,
     list_unidentified_drones,
 )
+from .security import authorize_websocket
+
+log = get_logger(__name__)
 
 router = APIRouter()
+ws_router = APIRouter()
 
 
 # ── Stations ──────────────────────────────────────────────────────────
@@ -166,8 +176,20 @@ async def get_drones(
 
 @router.get("/drones/unidentified", response_model=list[str])
 async def get_unidentified_drones(
+    request: Request,
     session: Annotated[AsyncSession, Depends(get_session)],
-    since_seconds: Annotated[int | None, Query(ge=0, le=86400)] = None,
+    since_seconds: Annotated[
+        int | None,
+        Query(
+            ge=1,
+            le=86400 * 30,
+            description="Lookback window; defaults to the server policy",
+        ),
+    ] = None,
+    all_history: Annotated[
+        bool,
+        Query(description="Explicitly scan all history (may be expensive)"),
+    ] = False,
 ) -> list[str]:
     """Drone IDs seen without an operator ID — the non-compliant set.
 
@@ -175,12 +197,25 @@ async def get_unidentified_drones(
     routes in declaration order, so a literal path registered after a
     parameterised one is unreachable — "unidentified" would be captured
     as a drone_id and 404 instead.
+
+    A finite default window keeps the endpoint from scanning years of
+    history on every dashboard poll.  Callers that really need a full
+    scan must opt in with ``all_history=true``.
     """
-    since = (
-        datetime.now(timezone.utc) - timedelta(seconds=since_seconds)
-        if since_seconds is not None
-        else None
-    )
+    if all_history and since_seconds is not None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail="use either since_seconds or all_history, not both",
+        )
+    settings = getattr(request.app.state, "settings", None) or get_settings()
+    since: datetime | None = None
+    if not all_history:
+        lookback = (
+            since_seconds
+            if since_seconds is not None
+            else settings.unidentified_lookback_s
+        )
+        since = datetime.now(timezone.utc) - timedelta(seconds=lookback)
     return list(await list_unidentified_drones(session, since=since))
 
 
@@ -196,11 +231,105 @@ async def get_drone_by_id(
 
 
 # ── Observations ──────────────────────────────────────────────────────
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _parse_bbox(bbox: str | None) -> tuple[float, float, float, float] | None:
+    if bbox is None:
+        return None
+    try:
+        parsed = tuple(float(x) for x in bbox.split(","))
+    except ValueError as exc:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, detail=f"invalid bbox: {exc}"
+        ) from exc
+    if len(parsed) != 4:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="invalid bbox")
+    min_lon, min_lat, max_lon, max_lat = parsed
+    if min_lon > max_lon or min_lat > max_lat:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail="bbox minimums must not exceed maximums",
+        )
+    return min_lon, min_lat, max_lon, max_lat
+
+
+def _parse_window(
+    bbox: str | None,
+    since_seconds: int | None,
+    from_: datetime | None,
+    to: datetime | None,
+) -> tuple[
+    tuple[float, float, float, float] | None,
+    datetime | None,
+    datetime | None,
+]:
+    parsed_bbox = _parse_bbox(bbox)
+    normalized_from = _as_utc(from_) if from_ is not None else None
+    normalized_to = _as_utc(to) if to is not None else None
+    if (
+        normalized_from is not None
+        and normalized_to is not None
+        and normalized_from > normalized_to
+    ):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail="'from' must be earlier than 'to'",
+        )
+    if since_seconds is not None:
+        since = datetime.now(timezone.utc) - timedelta(seconds=since_seconds)
+    else:
+        since = normalized_from
+    return parsed_bbox, since, normalized_to
+
+
+async def _read_observation_page(
+    session: AsyncSession,
+    *,
+    limit: int,
+    offset: int,
+    before: tuple[datetime, str] | None,
+    drone_id: str | None,
+    station_id: str | None,
+    bbox: tuple[float, float, float, float] | None,
+    since: datetime | None,
+    until: datetime | None,
+    unidentified_only: bool,
+) -> tuple[list[Observation], str | None]:
+    rows = await list_observations(
+        session,
+        limit=limit + 1,
+        offset=offset,
+        before=before,
+        drone_id=drone_id,
+        station_id=station_id,
+        bbox=bbox,
+        since=since,
+        until=until,
+        unidentified_only=unidentified_only,
+    )
+    visible = list(rows[:limit])
+    next_cursor = (
+        encode_cursor(visible[-1].received_at, visible[-1].observation_id)
+        if len(rows) > limit and visible
+        else None
+    )
+    return visible, next_cursor
+
+
 @router.get("/observations", response_model=list[DroneObservation])
 async def get_observations(
+    response: Response,
     session: Annotated[AsyncSession, Depends(get_session)],
     limit: Annotated[int, Query(ge=1, le=1000)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
+    cursor: Annotated[
+        str | None,
+        Query(description="Opaque keyset cursor returned in X-Next-Cursor"),
+    ] = None,
     drone_id: Annotated[str | None, Query()] = None,
     station_id: Annotated[str | None, Query()] = None,
     bbox: Annotated[
@@ -224,36 +353,89 @@ async def get_observations(
         Query(description="Only drones that broadcast no operator ID"),
     ] = False,
 ) -> list[DroneObservation]:
-    parsed_bbox: tuple[float, float, float, float] | None = None
-    if bbox is not None:
-        try:
-            parsed_bbox = tuple(float(x) for x in bbox.split(","))  # type: ignore[assignment]
-        except ValueError as e:
-            raise HTTPException(
-                status.HTTP_400_BAD_REQUEST, detail=f"invalid bbox: {e}"
-            ) from e
-    if from_ is not None and to is not None and from_ > to:
+    if cursor is not None and offset > 0:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            detail="'from' must be earlier than 'to'",
+            detail="cursor and offset are mutually exclusive",
         )
-    since: datetime | None = None
-    if since_seconds is not None:
-        since = datetime.now(timezone.utc) - timedelta(seconds=since_seconds)
-    elif from_ is not None:
-        since = from_
-    rows = await list_observations(
+    try:
+        before = decode_cursor(cursor) if cursor else None
+    except ValueError as exc:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
+    parsed_bbox, since, until = _parse_window(bbox, since_seconds, from_, to)
+    rows, next_cursor = await _read_observation_page(
         session,
         limit=limit,
         offset=offset,
+        before=before,
         drone_id=drone_id,
         station_id=station_id,
         bbox=parsed_bbox,
         since=since,
-        until=to,
+        until=until,
         unidentified_only=unidentified_only,
     )
+    if next_cursor is not None:
+        response.headers["X-Next-Cursor"] = next_cursor
     return [_row_to_observation(r) for r in rows]
+
+
+@router.get("/observations/page", response_model=ObservationPage)
+async def get_observations_page(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    limit: Annotated[int, Query(ge=1, le=1000)] = 100,
+    cursor: Annotated[
+        str | None,
+        Query(description="Opaque keyset cursor returned as next_cursor"),
+    ] = None,
+    drone_id: Annotated[str | None, Query()] = None,
+    station_id: Annotated[str | None, Query()] = None,
+    bbox: Annotated[
+        str | None,
+        Query(
+            description="min_lon,min_lat,max_lon,max_lat",
+            pattern=r"^-?\d+(\.\d+)?,-?\d+(\.\d+)?,-?\d+(\.\d+)?,-?\d+(\.\d+)?$",
+        ),
+    ] = None,
+    since_seconds: Annotated[int | None, Query(ge=0, le=86400)] = None,
+    from_: Annotated[
+        datetime | None,
+        Query(alias="from", description="Absolute window start (ISO 8601, inclusive)"),
+    ] = None,
+    to: Annotated[
+        datetime | None,
+        Query(description="Absolute window end (ISO 8601, inclusive)"),
+    ] = None,
+    unidentified_only: Annotated[
+        bool,
+        Query(description="Only drones that broadcast no operator ID"),
+    ] = False,
+) -> ObservationPage:
+    try:
+        before = decode_cursor(cursor) if cursor else None
+    except ValueError as exc:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
+    parsed_bbox, since, until = _parse_window(bbox, since_seconds, from_, to)
+    rows, next_cursor = await _read_observation_page(
+        session,
+        limit=limit,
+        offset=0,
+        before=before,
+        drone_id=drone_id,
+        station_id=station_id,
+        bbox=parsed_bbox,
+        since=since,
+        until=until,
+        unidentified_only=unidentified_only,
+    )
+    return ObservationPage(
+        items=[_row_to_observation(r) for r in rows],
+        next_cursor=next_cursor,
+    )
 
 
 # ── WebSocket: live stream ────────────────────────────────────────────
@@ -266,7 +448,7 @@ def _bus_from_app_state(websocket: WebSocket) -> ObservationBus:
     return websocket.app.state.bus
 
 
-@router.websocket("/ws/observations", name="ws_observations")
+@ws_router.websocket("/ws/observations", name="ws_observations")
 async def ws_observations(
     websocket: WebSocket,
     bus: Annotated[ObservationBus, Depends(_bus_from_app_state)],
@@ -276,41 +458,97 @@ async def ws_observations(
     Protocol (server → client):
         {"type": "obs",   "data": <DroneObservation>}
         {"type": "alert", "data": <Alert>}
+        {"type": "ping"}                    every ws_ping_interval_s
 
-    Both ride one connection in arrival order, so a client never sees an
-    alert before the observation that caused it.
-
-    The connection is closed by the server if the client sends anything
-    other than the optional ``{"type": "ping"}`` heartbeats.
+    Clients may send ``{"type":"ping"}``; the server answers with
+    ``{"type":"pong"}``.  The periodic server ping lets the browser
+    watchdog detect a half-open connection instead of waiting forever for
+    ``onclose``.
     """
-    await websocket.accept()
-    async with bus.subscribe() as queue:
-        try:
+    allowed, subprotocol = authorize_websocket(websocket)
+    if not allowed:
+        await websocket.close(
+            code=status.WS_1008_POLICY_VIOLATION,
+            reason="unauthorized",
+        )
+        return
+
+    await websocket.accept(subprotocol=subprotocol)
+    settings = getattr(websocket.app.state, "settings", None) or get_settings()
+    ping_interval = settings.ws_ping_interval_s
+    send_lock = asyncio.Lock()
+
+    async def send(payload: dict) -> None:
+        async with send_lock:
+            await websocket.send_json(payload)
+
+    async def sender() -> None:
+        async with bus.subscribe() as queue:
             while True:
-                # Race the receive (heartbeat) against the next bus item.
-                receive_task = asyncio.create_task(websocket.receive_text())
-                get_task = asyncio.create_task(queue.get())
-                done, pending = await asyncio.wait(
-                    {receive_task, get_task},
-                    return_when=asyncio.FIRST_COMPLETED,
+                frame = await queue.get()
+                await send({"type": frame["kind"], "data": frame["data"]})
+
+    async def receiver() -> None:
+        while True:
+            raw = await websocket.receive_text()
+            if len(raw) > 512:
+                await websocket.close(
+                    code=status.WS_1009_MESSAGE_TOO_BIG,
+                    reason="message too large",
                 )
-                for t in pending:
-                    t.cancel()
-                if get_task in done:
-                    frame = get_task.result()
-                    await websocket.send_json(
-                        {"type": frame["kind"], "data": frame["data"]}
-                    )
-                if receive_task in done:
-                    msg = receive_task.result()
-                    if msg and msg.strip() != '{"type":"ping"}':
-                        await websocket.close(code=1003, reason="no client→server msgs")
-                        return
-        except WebSocketDisconnect:
-            pass
-        except Exception:
-            with contextlib.suppress(Exception):
-                await websocket.close()
+                return
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                await websocket.close(
+                    code=status.WS_1007_INVALID_FRAME_PAYLOAD_DATA,
+                    reason="invalid JSON",
+                )
+                return
+            if not isinstance(payload, dict):
+                await websocket.close(
+                    code=status.WS_1003_UNSUPPORTED_DATA,
+                    reason="object frame required",
+                )
+                return
+            kind = payload.get("type")
+            if kind == "ping":
+                await send({"type": "pong"})
+            elif kind != "pong":
+                await websocket.close(
+                    code=status.WS_1003_UNSUPPORTED_DATA,
+                    reason="unsupported message type",
+                )
+                return
+
+    async def heartbeat() -> None:
+        while True:
+            await asyncio.sleep(ping_interval)
+            await send({"type": "ping"})
+
+    tasks = [
+        asyncio.create_task(sender(), name="ws-sender"),
+        asyncio.create_task(receiver(), name="ws-receiver"),
+        asyncio.create_task(heartbeat(), name="ws-heartbeat"),
+    ]
+    try:
+        done, _ = await asyncio.wait(
+            tasks,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in done:
+            with contextlib.suppress(asyncio.CancelledError, WebSocketDisconnect):
+                task.result()
+    except (WebSocketDisconnect, RuntimeError):
+        pass
+    except Exception as exc:  # noqa: BLE001
+        log.warning("ws.closed_with_error", error=str(exc)[:200])
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        with contextlib.suppress(Exception):
+            await websocket.close()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────

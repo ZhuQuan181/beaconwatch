@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Sequence
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, case, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -89,26 +89,30 @@ async def list_stations(session: AsyncSession) -> Sequence[Station]:
 # ── Observation → DB ──────────────────────────────────────────────────
 async def write_observation(
     session: AsyncSession, obs: DroneObservation
-) -> None:
+) -> bool:
     """Append an observation, upserting the parent ``drones`` row.
 
-    Uses an UPSERT on ``drones`` to keep ``last_seen`` and
-    ``observation_count`` monotonic.  The per-row observation is
-    inserted with ``ON CONFLICT DO NOTHING`` on ``observation_id``
-    (idempotency — edge may retry after reconnect).
+    The observation insert is the source of truth for whether the
+    aggregate count increments.  A placeholder drone row is created
+    first to satisfy the foreign key; only a newly inserted observation
+    then updates the summary.  This removes the old
+    increment-then-compensate race for duplicate MQTT deliveries.
+
+    ``last_seen``/position fields only move forward, so an out-of-order
+    retry cannot make a drone appear to jump backwards.
+
+    Returns ``True`` when a new observation row was inserted.
     """
     # SQLite path: write lat/lon directly.  When the column is PostGIS
     # ``Geometry`` in the future, swap to ``from_shape(Point(...), srid=4326)``
     # and remove the explicit lat/lon columns.
-    # 1) Upsert drone summary FIRST so the FK exists when we insert
-    # the observation row.  ``on_conflict_do_nothing`` on observations
-    # means we may hit a duplicate path later, but the drone row is
-    # always authoritative.
-    drone_stmt = (
+    # 1) Ensure the FK target exists.  This is intentionally not the
+    # aggregate update: a duplicate observation must not increment it.
+    await session.execute(
         pg_insert(Drone)
         .values(
             drone_id=obs.drone_id,
-            uas_id=obs.drone_id,    # we don't carry the decoded uas_id on the wire yet
+            uas_id=obs.drone_id,    # decoded uas_id is not on the wire yet
             ua_type="unknown",
             first_seen=obs.received_at,
             last_seen=obs.received_at,
@@ -116,21 +120,10 @@ async def write_observation(
             last_position_lon=obs.position.lon,
             last_position_alt_m=obs.position.alt_m,
             last_station_id=obs.station_id,
-            observation_count=1,
+            observation_count=0,
         )
-        .on_conflict_do_update(
-            index_elements=["drone_id"],
-            set_=dict(
-                last_seen=obs.received_at,
-                last_position_lat=obs.position.lat,
-                last_position_lon=obs.position.lon,
-                last_position_alt_m=obs.position.alt_m,
-                last_station_id=obs.station_id,
-                observation_count=Drone.observation_count + 1,
-            ),
-        )
+        .on_conflict_do_nothing(index_elements=["drone_id"])
     )
-    await session.execute(drone_stmt)
 
     # 2) Append the observation row itself.  Idempotent on
     # (observation_id, received_at) so edge retries are safe.
@@ -156,16 +149,60 @@ async def write_observation(
         .on_conflict_do_nothing(index_elements=["observation_id", "received_at"])
     )
     obs_result = await session.execute(obs_stmt)
-    inserted = obs_result.rowcount > 0
-    if not inserted:
-        # Duplicate — the drone counter was already incremented above.
-        # Roll back the counter bump so totals stay accurate.
-        await session.execute(
-            update(Drone)
-            .where(Drone.drone_id == obs.drone_id)
-            .values(observation_count=Drone.observation_count - 1)
+    inserted = (obs_result.rowcount or 0) > 0
+
+    if inserted:
+        # Only a row that actually landed contributes to the aggregate.
+        # CASE expressions are portable across PostgreSQL and SQLite.
+        should_advance = Drone.last_seen <= obs.received_at
+        drone_upsert = (
+            pg_insert(Drone)
+            .values(
+                drone_id=obs.drone_id,
+                uas_id=obs.drone_id,
+                ua_type="unknown",
+                first_seen=obs.received_at,
+                last_seen=obs.received_at,
+                last_position_lat=obs.position.lat,
+                last_position_lon=obs.position.lon,
+                last_position_alt_m=obs.position.alt_m,
+                last_station_id=obs.station_id,
+                observation_count=1,
+            )
+            .on_conflict_do_update(
+                index_elements=["drone_id"],
+                set_=dict(
+                    first_seen=case(
+                        (Drone.first_seen <= obs.received_at, Drone.first_seen),
+                        else_=obs.received_at,
+                    ),
+                    last_seen=case(
+                        (should_advance, obs.received_at),
+                        else_=Drone.last_seen,
+                    ),
+                    last_position_lat=case(
+                        (should_advance, obs.position.lat),
+                        else_=Drone.last_position_lat,
+                    ),
+                    last_position_lon=case(
+                        (should_advance, obs.position.lon),
+                        else_=Drone.last_position_lon,
+                    ),
+                    last_position_alt_m=case(
+                        (should_advance, obs.position.alt_m),
+                        else_=Drone.last_position_alt_m,
+                    ),
+                    last_station_id=case(
+                        (should_advance, obs.station_id),
+                        else_=Drone.last_station_id,
+                    ),
+                    observation_count=Drone.observation_count + 1,
+                ),
+            )
         )
+        await session.execute(drone_upsert)
     await session.commit()
+    return inserted
 
 
 # ── Reads ─────────────────────────────────────────────────────────────
@@ -180,6 +217,7 @@ async def list_observations(
     since: datetime | None = None,
     until: datetime | None = None,
     unidentified_only: bool = False,
+    before: tuple[datetime, str] | None = None,
 ) -> Sequence[Observation]:
     """Filtered, time-ordered (newest first) observation listing.
 
@@ -192,7 +230,10 @@ async def list_observations(
     ``unidentified_only`` keeps only rows with no operator ID — the
     "find the ghost drone" view.
     """
-    stmt = select(Observation).order_by(Observation.received_at.desc())
+    stmt = select(Observation).order_by(
+        Observation.received_at.desc(),
+        Observation.observation_id.desc(),
+    )
     if drone_id is not None:
         stmt = stmt.where(Observation.drone_id == drone_id)
     if station_id is not None:
@@ -210,6 +251,17 @@ async def list_observations(
             Observation.position_lon <= max_lon,
             Observation.position_lat >= min_lat,
             Observation.position_lat <= max_lat,
+        )
+    if before is not None:
+        before_at, before_id = before
+        stmt = stmt.where(
+            or_(
+                Observation.received_at < before_at,
+                and_(
+                    Observation.received_at == before_at,
+                    Observation.observation_id < before_id,
+                ),
+            )
         )
     stmt = stmt.limit(limit).offset(offset)
     result = await session.execute(stmt)

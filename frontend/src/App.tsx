@@ -55,30 +55,42 @@ export function App() {
   useEffect(() => {
     let alive = true;
     let refreshing = false;
+    let controller: AbortController | null = null;
 
     const refresh = async () => {
       if (!alive || refreshing || document.visibilityState === "hidden") return;
       refreshing = true;
+      controller?.abort();
+      const current = new AbortController();
+      controller = current;
       try {
         const [rows, unidentified] = await Promise.all([
-          api.listObservations({ limit: HISTORY_LIMIT }),
-          api.listUnidentified(),
+          api.listObservations({ limit: HISTORY_LIMIT }, current.signal),
+          api.listUnidentified(current.signal),
         ]);
-        if (!alive) return;
+        if (!alive || current.signal.aborted) return;
         setHistory(rows);
         setGhostIds(unidentified);
       } catch {
         /* keep the previous snapshot; the live view is unaffected */
       } finally {
+        if (controller === current) controller = null;
         refreshing = false;
       }
     };
 
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") void refresh();
+    };
+
     void refresh();
     const timer = window.setInterval(() => void refresh(), HISTORY_REFRESH_MS);
+    document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
       alive = false;
+      controller?.abort();
       window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, []);
 
@@ -97,6 +109,7 @@ export function App() {
       return;
     }
     let alive = true;
+    const controller = new AbortController();
     setReplayLoading(true);
     const to = new Date(cursorTs);
 
@@ -106,7 +119,7 @@ export function App() {
         limit: 1000,
         from: from.toISOString(),
         to: to.toISOString(),
-      });
+      }, controller.signal);
     };
 
     (async () => {
@@ -124,11 +137,11 @@ export function App() {
           seconds = 900;
           rows = await fetchWindow(seconds);
         }
-        if (!alive) return;
+        if (!alive || controller.signal.aborted) return;
         setReplayRows(rows);
         setReplayLoading(false);
       } catch {
-        if (!alive) return;
+        if (!alive || controller.signal.aborted) return;
         setReplayRows([]);
         setReplayLoading(false);
       }
@@ -136,6 +149,7 @@ export function App() {
 
     return () => {
       alive = false;
+      controller.abort();
     };
   }, [cursorTs]);
 

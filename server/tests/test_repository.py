@@ -88,9 +88,9 @@ async def test_write_observation_idempotent_on_observation_id(
         ),
     )
     obs = _obs_model(drone_id="D-B", station_id="station-1")
-    await write_observation(session, obs)
+    assert await write_observation(session, obs) is True
     # Second insert with same observation_id → no-op
-    await write_observation(session, obs)
+    assert await write_observation(session, obs) is False
 
     drone = await session.get(Drone, "D-B")
     # Drone count should still be 1 (UPSERT fires once, then ON CONFLICT
@@ -120,6 +120,41 @@ async def test_write_observation_monotonic_count(session: AsyncSession):
     drone = await session.get(Drone, base)
     assert drone is not None
     assert drone.observation_count == 3
+
+
+async def test_out_of_order_observation_does_not_move_drone_backwards(
+    session: AsyncSession,
+):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    newer = _obs_model(
+        drone_id="D-ORDER",
+        station_id="station-1",
+        lat=10.0,
+        lon=20.0,
+        received_at=now,
+    )
+    newer.observation_id = "obs-newer"
+    older = _obs_model(
+        drone_id="D-ORDER",
+        station_id="station-1",
+        lat=1.0,
+        lon=2.0,
+        received_at=now - timedelta(minutes=5),
+    )
+    older.observation_id = "obs-older"
+
+    await touch_station(session, "station-1")
+    await write_observation(session, newer)
+    await write_observation(session, older)
+
+    drone = await session.get(Drone, "D-ORDER")
+    assert drone is not None
+    assert drone.observation_count == 2
+    assert drone.last_seen.replace(tzinfo=timezone.utc) == newer.received_at
+    assert drone.last_position_lat == newer.position.lat
+    assert drone.last_position_lon == newer.position.lon
 
 
 async def test_list_observations_filters_by_bbox(session: AsyncSession):

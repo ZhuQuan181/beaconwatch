@@ -8,7 +8,9 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock
 
+import pytest
 from conftest import make_obs
+from rid_server.config import Settings
 from rid_server.mqtt_subscriber import MqttSubscriber
 from rid_server.repository import (
     list_drones,
@@ -217,3 +219,53 @@ async def test_station_info_trusts_topic_station_id(db_engine, _sqlite_settings)
     async with factory() as s:
         rows = await list_stations(s)
     assert [r.station_id for r in rows] == ["topic-station"]
+
+
+async def test_duplicate_message_is_not_fanned_out_twice(
+    db_engine, _sqlite_settings
+):
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    sub = MqttSubscriber(_sqlite_settings)
+    published: list[str] = []
+
+    async def on_persisted(obs) -> None:
+        published.append(obs.observation_id)
+
+    sub.on_persisted = on_persisted
+    obs = make_obs(drone_id="D-DUP", station_id="station-1")
+    payload = json.dumps(obs).encode()
+
+    await sub.handle_message("rid/v1/station-1/obs", payload)
+    await sub.handle_message("rid/v1/station-1/obs", payload)
+
+    assert sub.received == 2
+    assert sub.persisted == 1
+    assert sub.duplicates == 1
+    assert published == [obs["observation_id"]]
+    async with factory() as s:
+        drones = await list_drones(s, online_within_s=3600)
+    assert drones[0].observation_count == 1
+
+
+def test_mqtt_tls_context_is_built_by_default(monkeypatch):
+    calls: list[str | None] = []
+    sentinel = object()
+
+    def fake_context(*, cafile=None):
+        calls.append(cafile)
+        return sentinel
+
+    monkeypatch.setattr("rid_server.mqtt_subscriber.ssl.create_default_context", fake_context)
+    sub = MqttSubscriber(Settings(mqtt_tls=True))
+    assert sub._tls_context is sentinel
+    assert calls == [None]
+
+
+def test_mqtt_client_cert_and_key_must_be_paired():
+    with pytest.raises(ValueError, match="must be set together"):
+        MqttSubscriber(
+            Settings(
+                mqtt_tls=True,
+                mqtt_client_cert="/tmp/client.crt",
+            )
+        )

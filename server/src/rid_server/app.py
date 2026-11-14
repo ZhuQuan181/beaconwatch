@@ -4,7 +4,9 @@ from __future__ import annotations
 import contextlib
 from collections.abc import AsyncIterator
 
-from fastapi import FastAPI, HTTPException, Request, Response, status
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from sqlalchemy import text
 
 from .alerts import AlertEngine, AlertRing
@@ -12,8 +14,10 @@ from .bus import ObservationBus
 from .config import get_settings
 from .db import dispose_engine, get_session_factory
 from .logging_setup import configure_logging, get_logger
+from .metrics import RequestMetrics
 from .mqtt_subscriber import MqttSubscriber
-from .routes import router
+from .routes import router, ws_router
+from .security import RequestContextMiddleware, require_api_token
 from .settings_state import set_subscriber_bus_hook
 
 log = get_logger(__name__)
@@ -22,7 +26,8 @@ log = get_logger(__name__)
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Start the MQTT subscriber; clean up the DB engine on shutdown."""
-    settings = get_settings()
+    settings = getattr(app.state, "settings", None) or get_settings()
+    app.state.settings = settings
     configure_logging(settings.log_level)
     log.info("startup", env=settings.env, http_port=settings.http_port)
 
@@ -55,12 +60,29 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 def create_app() -> FastAPI:
+    settings = get_settings()
+    request_metrics = RequestMetrics()
     app = FastAPI(
         title="RID Server",
-        version="0.2.0",
+        version="0.3.0",
         lifespan=lifespan,
     )
-    app.include_router(router)
+    app.state.settings = settings
+    app.state.metrics = request_metrics
+    app.include_router(router, dependencies=[Depends(require_api_token)])
+    app.include_router(ws_router)
+
+    if settings.cors_origin_list:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=settings.cors_origin_list,
+            allow_methods=["GET", "PUT", "OPTIONS"],
+            allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
+            expose_headers=["X-Request-ID", "X-Next-Cursor"],
+            max_age=600,
+        )
+    app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
+    app.add_middleware(RequestContextMiddleware, metrics=request_metrics)
 
     @app.get("/health", tags=["meta"])
     async def health() -> dict[str, str]:
@@ -88,7 +110,7 @@ def create_app() -> FastAPI:
         return {"status": "ready"}
 
     @app.get("/metrics", tags=["meta"], include_in_schema=False)
-    async def metrics(request: Request) -> Response:
+    async def get_metrics(request: Request) -> Response:
         subscriber = getattr(request.app.state, "subscriber", None)
         bus = getattr(request.app.state, "bus", None)
         values = {
@@ -97,10 +119,19 @@ def create_app() -> FastAPI:
             "rid_mqtt_persisted_total": int(getattr(subscriber, "persisted", 0)),
             "rid_mqtt_invalid_total": int(getattr(subscriber, "invalid", 0)),
             "rid_mqtt_reconnects_total": int(getattr(subscriber, "reconnects", 0)),
+            "rid_mqtt_duplicates_total": int(getattr(subscriber, "duplicates", 0)),
             "rid_station_info_total": int(getattr(subscriber, "station_infos", 0)),
             "rid_ws_clients": int(getattr(bus, "subscriber_count", 0)),
+            "rid_ws_dropped_frames_total": int(
+                getattr(bus, "dropped_frames", 0)
+            ),
+            "rid_ws_delivered_frames_total": int(
+                getattr(bus, "delivered_frames", 0)
+            ),
         }
-        body = "\n".join(f"{name} {value}" for name, value in values.items()) + "\n"
+        lines = [f"{name} {value}" for name, value in values.items()]
+        lines.extend(request.app.state.metrics.render())
+        body = "\n".join(lines) + "\n"
         return Response(body, media_type="text/plain; version=0.0.4")
 
     # The WebSocket route needs the bus — bind it via app.state.

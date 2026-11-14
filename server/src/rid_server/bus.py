@@ -35,6 +35,9 @@ class ObservationBus:
         self._subscribers: list[asyncio.Queue[dict[str, Any]]] = []
         self._max_queue = max_queue_per_client
         self._lock = asyncio.Lock()
+        self._subscriber_count = 0
+        self._dropped_frames = 0
+        self._delivered_frames = 0
 
     async def publish(self, obs: DroneObservation) -> None:
         await self._push({"kind": "obs", "data": obs.model_dump(mode="json")})
@@ -54,6 +57,7 @@ class ObservationBus:
             for q in self._subscribers:
                 try:
                     q.put_nowait(frame)
+                    self._delivered_frames += 1
                 except asyncio.QueueFull:
                     # Only the slowest queue pays the eviction price.
                     # Drop ONE oldest item and retry.  If still full
@@ -62,28 +66,41 @@ class ObservationBus:
                     # avoid head-of-line blocking the publisher.
                     with _swallow():
                         q.get_nowait()
+                    self._dropped_frames += 1
                     try:
                         q.put_nowait(frame)
+                        self._delivered_frames += 1
                     except asyncio.QueueFull:  # pragma: no cover
                         dead.append(q)
             for q in dead:
                 self._subscribers.remove(q)
+                self._subscriber_count = len(self._subscribers)
 
     @asynccontextmanager
     async def subscribe(self) -> AsyncIterator[asyncio.Queue[dict[str, Any]]]:
         q: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=self._max_queue)
         async with self._lock:
             self._subscribers.append(q)
+            self._subscriber_count = len(self._subscribers)
         try:
             yield q
         finally:
             async with self._lock:
                 if q in self._subscribers:
                     self._subscribers.remove(q)
+                    self._subscriber_count = len(self._subscribers)
 
     @property
     def subscriber_count(self) -> int:
-        return len(self._subscribers)
+        return self._subscriber_count
+
+    @property
+    def dropped_frames(self) -> int:
+        return self._dropped_frames
+
+    @property
+    def delivered_frames(self) -> int:
+        return self._delivered_frames
 
 
 class _swallow:

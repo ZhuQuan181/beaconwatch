@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     station_lat: float = Field(default=0.0, ge=-90, le=90)
     station_lon: float = Field(default=0.0, ge=-180, le=180)
     station_alt_m: float = Field(default=0.0, ge=-1000, le=100000)
-    firmware_version: str = Field(default="0.2.0", max_length=32)
+    firmware_version: str = Field(default="0.3.0", max_length=32)
 
     # ---- Wi-Fi receiver ----
     wifi_enabled: bool = Field(default=True)
@@ -78,6 +78,20 @@ class Settings(BaseSettings):
         ge=1,
         le=1000,
         description="Per-station outgoing observation rate cap",
+    )
+
+    # ---- Receiver supervision ----
+    receiver_backoff_base_s: float = Field(
+        default=1.0,
+        gt=0,
+        le=60,
+        description="Initial restart delay after a receiver crash",
+    )
+    receiver_backoff_max_s: float = Field(
+        default=30.0,
+        gt=0,
+        le=600,
+        description="Maximum receiver restart delay",
     )
 
     # ---- Local buffer (offline safe) ----

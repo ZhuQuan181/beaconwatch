@@ -7,6 +7,7 @@ import httpx
 from conftest import make_obs
 from rid_server.app import create_app
 from rid_server.bus import ObservationBus
+from rid_server.config import Settings
 from rid_server.mqtt_subscriber import MqttSubscriber
 from rid_server.repository import upsert_station, write_observation
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -331,3 +332,116 @@ async def test_rssi_appears_in_api_response(db_engine):
         r = await c.get("/observations", params={"limit": 1})
     assert r.status_code == 200
     assert r.json()[0]["rssi_dbm"] == -62
+
+
+# ── Operational hardening ─────────────────────────────────────────────
+async def test_security_headers_and_request_id(db_engine):
+    app = create_app()
+    app.state.bus = ObservationBus()
+    app.state.subscriber = MqttSubscriber(_settings())
+    async with _client(app) as c:
+        r = await c.get("/health", headers={"X-Request-ID": "trace-123"})
+    assert r.status_code == 200
+    assert r.headers["x-request-id"] == "trace-123"
+    assert r.headers["x-content-type-options"] == "nosniff"
+    assert r.headers["x-frame-options"] == "DENY"
+    assert r.headers["referrer-policy"] == "no-referrer"
+    assert r.headers["cache-control"] == "no-store"
+
+
+async def test_optional_api_token_protects_data_not_health(db_engine):
+    app = create_app()
+    app.state.bus = ObservationBus()
+    app.state.subscriber = MqttSubscriber(_settings())
+    app.state.settings = Settings(api_token="s3cret")
+
+    async with _client(app) as c:
+        assert (await c.get("/health")).status_code == 200
+        unauthorized = await c.get("/stations")
+        assert unauthorized.status_code == 401
+        assert unauthorized.headers["www-authenticate"] == "Bearer"
+        authorized = await c.get(
+            "/stations",
+            headers={"Authorization": "Bearer s3cret"},
+        )
+    assert authorized.status_code == 200
+
+
+async def test_observations_cursor_pagination(db_engine):
+    await _seed_three_observations(db_engine)
+    app = create_app()
+    app.state.bus = ObservationBus()
+    app.state.subscriber = MqttSubscriber(_settings())
+
+    async with _client(app) as c:
+        first = await c.get("/observations", params={"limit": 1})
+        assert first.status_code == 200
+        assert [row["observation_id"] for row in first.json()] == ["obs-anon"]
+        cursor = first.headers["x-next-cursor"]
+
+        second = await c.get(
+            "/observations",
+            params={"limit": 1, "cursor": cursor},
+        )
+        assert second.status_code == 200
+        assert [row["observation_id"] for row in second.json()] == ["obs-mid"]
+        second_cursor = second.headers["x-next-cursor"]
+
+        third = await c.get(
+            "/observations",
+            params={"limit": 1, "cursor": second_cursor},
+        )
+    assert [row["observation_id"] for row in third.json()] == ["obs-early"]
+    assert "x-next-cursor" not in third.headers
+
+
+async def test_observations_page_endpoint_returns_cursor(db_engine):
+    await _seed_three_observations(db_engine)
+    app = create_app()
+    app.state.bus = ObservationBus()
+    app.state.subscriber = MqttSubscriber(_settings())
+
+    async with _client(app) as c:
+        first = await c.get("/observations/page", params={"limit": 2})
+        assert first.status_code == 200
+        body = first.json()
+        assert [row["observation_id"] for row in body["items"]] == [
+            "obs-anon",
+            "obs-mid",
+        ]
+        assert body["next_cursor"]
+
+        second = await c.get(
+            "/observations/page",
+            params={"limit": 2, "cursor": body["next_cursor"]},
+        )
+    assert [row["observation_id"] for row in second.json()["items"]] == [
+        "obs-early"
+    ]
+    assert second.json()["next_cursor"] is None
+
+
+async def test_invalid_cursor_is_400(db_engine):
+    app = create_app()
+    app.state.bus = ObservationBus()
+    app.state.subscriber = MqttSubscriber(_settings())
+    async with _client(app) as c:
+        r = await c.get("/observations", params={"cursor": "not-a-cursor"})
+    assert r.status_code == 400
+
+
+async def test_metrics_include_request_and_websocket_counters(db_engine):
+    app = create_app()
+    app.state.bus = ObservationBus()
+    app.state.subscriber = MqttSubscriber(_settings())
+    async with _client(app) as c:
+        await c.get("/health")
+        r = await c.get("/metrics")
+    assert r.status_code == 200
+    assert "rid_http_requests_total" in r.text
+    assert "rid_http_requests_in_flight" in r.text
+    assert (
+        'rid_http_responses_total{method="GET",route="/health",status="200"} 1'
+        in r.text
+    )
+    assert "rid_ws_dropped_frames_total 0" in r.text

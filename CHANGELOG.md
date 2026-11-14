@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.3.0 - 2026-11-15
+
+### Added
+
+- Optional Bearer-token authentication for REST and WebSocket traffic via
+  `RID_API_TOKEN`; health checks and metrics remain unauthenticated for probes.
+- Request IDs, security headers, gzip compression, optional CORS origins and
+  HTTP request/duration/auth-failure Prometheus metrics.
+- Stable keyset pagination for observation history through `X-Next-Cursor`,
+  `cursor=` compatibility and a dedicated `/observations/page` response.
+- Database indexes for recent-drone, station-window, operator-window and
+  cursor-ordered observation queries.
+- WebSocket heartbeat/pong frames, malformed-client handling and browser-side
+  stale-connection watchdog.
+- Supervised edge receivers with bounded exponential restart and queue-drop
+  counters.
+- Verified MQTT TLS contexts on the server, including optional private CA and
+  client-certificate support.
+- Browser request deadlines, retry/backoff, request cancellation and
+  visibility-aware polling.
+
+### Fixed
+
+- Duplicate MQTT deliveries no longer increase drone observation counts, emit
+  duplicate WebSocket frames or re-run alert rules.
+- Out-of-order fixes no longer move a drone's last-seen position backwards.
+- Duplicate REST seed/live rows are deduplicated in the dashboard.
+- WebSocket clients no longer schedule reconnect timers after unmount, and
+  half-open connections no longer stay "connected" indefinitely.
+- Unidentified-drone queries no longer scan all history by default.
+
+### Changed
+
+- API history ordering is deterministic on `(received_at, observation_id)`.
+- Frontend polling stops while the tab is hidden and refreshes immediately on
+  return.
+- Repository/package metadata advanced to 0.3.0.
+
 ## 0.2.0 - 2026-11-15
 
 ### Added

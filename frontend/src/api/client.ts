@@ -2,36 +2,159 @@
  * Thin HTTP client.  Goes through Vite's /api proxy in dev so we
  * never talk to the server's port directly from the browser (no CORS,
  * no hardcoded hostnames).
+ *
+ * Every GET has a deadline, supports caller cancellation, and retries
+ * only safe/idempotent requests with bounded jittered backoff.
  */
 import type {
   Alert,
   DroneObservation,
   DroneSummary,
   GeofenceZone,
+  ObservationPage,
   Station,
 } from "../types";
 
 const BASE = "/api";
+const DEFAULT_TIMEOUT_MS = 8_000;
+const DEFAULT_RETRIES = 2;
+const API_TOKEN = (import.meta.env.VITE_API_TOKEN ?? "").trim();
 
-async function jsonGet<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`);
-  if (!res.ok) {
-    throw new Error(`GET ${path} failed: ${res.status} ${res.statusText}`);
+class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status?: number,
+    readonly retryable = false,
+  ) {
+    super(message);
+    this.name = "ApiError";
   }
-  return (await res.json()) as T;
+}
+
+export function getApiToken(): string {
+  return API_TOKEN;
+}
+
+function isRetryable(error: unknown): boolean {
+  if (error instanceof ApiError) return error.retryable;
+  return error instanceof TypeError;
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    let timer: ReturnType<typeof setTimeout>;
+    const cleanup = () => signal?.removeEventListener("abort", onAbort);
+    const onAbort = () => {
+      clearTimeout(timer);
+      cleanup();
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+async function fetchOnce<T>(
+  path: string,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<T> {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  const onOuterAbort = () => controller.abort();
+
+  if (signal?.aborted) {
+    controller.abort();
+  } else {
+    signal?.addEventListener("abort", onOuterAbort, { once: true });
+  }
+
+  try {
+    const headers: Record<string, string> = {};
+    if (API_TOKEN) headers.Authorization = `Bearer ${API_TOKEN}`;
+    const res = await fetch(`${BASE}${path}`, {
+      headers,
+      signal: controller.signal,
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      throw new ApiError(
+        `GET ${path} failed: ${res.status} ${res.statusText}`,
+        res.status,
+        res.status === 429 || res.status >= 500,
+      );
+    }
+    return (await res.json()) as T;
+  } catch (error) {
+    if (timedOut) {
+      throw new ApiError(`GET ${path} timed out`, undefined, true);
+    }
+    if (signal?.aborted) {
+      throw new DOMException("Aborted", "AbortError");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onOuterAbort);
+  }
+}
+
+async function jsonGet<T>(
+  path: string,
+  options: {
+    signal?: AbortSignal;
+    timeoutMs?: number;
+    retries?: number;
+  } = {},
+): Promise<T> {
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const retries = Math.max(0, options.retries ?? DEFAULT_RETRIES);
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      return await fetchOnce<T>(path, timeoutMs, options.signal);
+    } catch (error) {
+      lastError = error;
+      if (options.signal?.aborted || !isRetryable(error) || attempt === retries) {
+        throw error;
+      }
+      await sleep(250 * 2 ** attempt + Math.random() * 150, options.signal);
+    }
+  }
+  throw lastError;
 }
 
 export const api = {
-  health: () => jsonGet<{ status: string }>("/health"),
-  listStations: () => jsonGet<Station[]>("/stations"),
-  listDrones: (params: { onlineWithinS?: number } = {}) => {
+  health: (signal?: AbortSignal) =>
+    jsonGet<{ status: string }>("/health", { signal }),
+
+  listStations: (signal?: AbortSignal) =>
+    jsonGet<Station[]>("/stations", { signal }),
+
+  listDrones: (
+    params: { onlineWithinS?: number } = {},
+    signal?: AbortSignal,
+  ) => {
     const q = new URLSearchParams();
     if (params.onlineWithinS !== undefined) {
       q.set("online_within_s", String(params.onlineWithinS));
     }
     const qs = q.toString();
-    return jsonGet<DroneSummary[]>(`/drones${qs ? `?${qs}` : ""}`);
+    return jsonGet<DroneSummary[]>(`/drones${qs ? `?${qs}` : ""}`, { signal });
   },
+
   listObservations: (
     params: {
       limit?: number;
@@ -39,7 +162,9 @@ export const api = {
       from?: string;
       to?: string;
       unidentifiedOnly?: boolean;
+      cursor?: string;
     } = {},
+    signal?: AbortSignal,
   ) => {
     const q = new URLSearchParams();
     if (params.limit !== undefined) q.set("limit", String(params.limit));
@@ -47,12 +172,45 @@ export const api = {
     if (params.from) q.set("from", params.from);
     if (params.to) q.set("to", params.to);
     if (params.unidentifiedOnly) q.set("unidentified_only", "true");
+    if (params.cursor) q.set("cursor", params.cursor);
     const qs = q.toString();
     return jsonGet<DroneObservation[]>(
       `/observations${qs ? `?${qs}` : ""}`,
+      { signal },
     );
   },
-  listUnidentified: () => jsonGet<string[]>("/drones/unidentified"),
-  listZones: () => jsonGet<GeofenceZone[]>("/zones"),
-  listAlerts: (limit = 50) => jsonGet<Alert[]>(`/alerts?limit=${limit}`),
+
+  listObservationsPage: (
+    params: {
+      limit?: number;
+      droneId?: string;
+      from?: string;
+      to?: string;
+      unidentifiedOnly?: boolean;
+      cursor?: string;
+    } = {},
+    signal?: AbortSignal,
+  ) => {
+    const q = new URLSearchParams();
+    if (params.limit !== undefined) q.set("limit", String(params.limit));
+    if (params.droneId) q.set("drone_id", params.droneId);
+    if (params.from) q.set("from", params.from);
+    if (params.to) q.set("to", params.to);
+    if (params.unidentifiedOnly) q.set("unidentified_only", "true");
+    if (params.cursor) q.set("cursor", params.cursor);
+    const qs = q.toString();
+    return jsonGet<ObservationPage>(
+      `/observations/page${qs ? `?${qs}` : ""}`,
+      { signal },
+    );
+  },
+
+  listUnidentified: (signal?: AbortSignal) =>
+    jsonGet<string[]>("/drones/unidentified", { signal }),
+
+  listZones: (signal?: AbortSignal) =>
+    jsonGet<GeofenceZone[]>("/zones", { signal }),
+
+  listAlerts: (limit = 50, signal?: AbortSignal) =>
+    jsonGet<Alert[]>(`/alerts?limit=${limit}`, { signal }),
 };

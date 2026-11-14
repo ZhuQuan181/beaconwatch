@@ -24,6 +24,7 @@ export interface DroneObservation {
   operator_id?: string | null;
   station_id: string;
   protocol: Protocol;
+  rssi_dbm?: number | null;
   position: Position;
   drone_timestamp?: string | null;
   received_at: string;
@@ -55,6 +56,11 @@ export interface Station {
   coverage_radius_m?: number;
 }
 
+export interface ObservationPage {
+  items: DroneObservation[];
+  next_cursor: string | null;
+}
+
 /** A no-fly volume; the map draws it and the rules test against it. */
 export interface GeofenceZone {
   zone_id: string;
@@ -82,4 +88,5 @@ export interface Alert {
 export type WsFrame =
   | { type: "obs"; data: DroneObservation }
   | { type: "alert"; data: Alert }
-  | { type: "ping" };
+  | { type: "ping" }
+  | { type: "pong" };

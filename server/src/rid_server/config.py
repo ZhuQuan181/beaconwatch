@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -25,6 +25,18 @@ class Settings(BaseSettings):
     # ── HTTP server ─────────────────────────────────────────────────
     http_host: str = "0.0.0.0"
     http_port: int = 8000
+    # Empty means "open" for local/demo deployments.  Set RID_API_TOKEN
+    # to require `Authorization: Bearer <token>` on data routes.
+    api_token: SecretStr | None = None
+    # Comma-separated origins; empty keeps the same-origin default.
+    cors_origins: str = ""
+    ws_ping_interval_s: float = Field(default=20.0, ge=5.0, le=120.0)
+    unidentified_lookback_s: int = Field(
+        default=7 * 24 * 60 * 60,
+        ge=60,
+        le=30 * 24 * 60 * 60,
+        description="Default recent window for /drones/unidentified",
+    )
 
     # ── PostgreSQL / TimescaleDB ────────────────────────────────────
     db_host: str = "localhost"
@@ -41,6 +53,9 @@ class Settings(BaseSettings):
     mqtt_username: str = ""
     mqtt_password: str = ""
     mqtt_tls: bool = False
+    mqtt_ca_cert: str = ""
+    mqtt_client_cert: str = ""
+    mqtt_client_key: str = ""
     mqtt_client_id: str = "rid-server"
     mqtt_obs_topic: str = "rid/v1/+/obs"
     mqtt_info_topic: str = "rid/v1/+/info"
@@ -67,6 +82,10 @@ class Settings(BaseSettings):
             f"postgresql+asyncpg://{self.db_user}:{self.db_password}"
             f"@{self.db_host}:{self.db_port}/{self.db_name}"
         )
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
 
 @lru_cache(maxsize=1)

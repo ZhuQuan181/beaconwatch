@@ -27,13 +27,17 @@ run the real edge/MQTT/database/API stack.
   NAN action frames, BLE service data (`0xFFFA`), standard Message Packs and
   Basic ID / Location / Self-ID / System / Operator ID messages.
 - **Reliable edge delivery:** SQLite outbox, QoS 0/1/2 publishing, PUBACK/PUBCOMP
-  waits, and re-queueing when the broker does not confirm a message.
+  waits, re-queueing when the broker does not confirm a message, and supervised
+  receivers that restart with bounded backoff.
 - **Server ingest:** MQTT observation and station-heartbeat topics, schema
-  validation, idempotent writes, TimescaleDB hypertable.
-- **Operations:** live/ready health checks, Prometheus text metrics, automatic
-  Alembic migrations in the server container.
-- **Dashboard:** live WebSocket feed, replay timeline, stations and coverage,
-  geofences, alerts, unidentified-drone highlighting.
+  validation, duplicate-safe idempotent writes, TimescaleDB hypertable and
+  indexed keyset pagination.
+- **Operations:** optional Bearer-token auth, request IDs, security headers,
+  gzip, live/ready health checks, Prometheus text metrics, automatic Alembic
+  migrations in the server container.
+- **Dashboard:** heartbeat-monitored live WebSocket feed, timeout/retry-aware
+  HTTP client, replay timeline, stations and coverage, geofences, alerts,
+  unidentified-drone highlighting.
 - **Verified chain:** official radio bytes → receiver → pipeline → MQTT →
   subscriber → database → HTTP, covered by unit, contract and E2E tests.
 
@@ -64,6 +68,11 @@ API documentation is at http://localhost:8000/docs and metrics are at
 http://localhost:8000/metrics. EMQX's local dashboard is at
 http://localhost:18083.
 
+For a private deployment, set `RID_API_TOKEN` on the server and build the
+dashboard with the same value in `VITE_API_TOKEN`. The build-time token is
+embedded in the browser bundle, so use an HTTPS reverse proxy (or an
+identity-aware gateway) rather than publishing that bundle to untrusted users.
+
 ## Testing
 
 ```bash
@@ -78,10 +87,13 @@ The E2E command expects the stack from `make up`. See
 ## Production Boundaries
 
 The Docker Compose file is a development/reference topology, not a hardened
-production deployment. Before exposing it to an untrusted network, add:
+production deployment. The API now supports optional Bearer authentication and
+the MQTT subscriber supports verified TLS, but before exposing the stack to an
+untrusted network you still need:
 
-- authentication and authorization on the HTTP/WebSocket API;
-- MQTT TLS, per-station credentials and ACLs;
+- authorization/roles, auditing and token rotation beyond the single shared
+  Bearer token;
+- MQTT TLS deployment, per-station credentials and ACLs;
 - HTTPS/WSS termination at a reverse proxy;
 - secret management and non-default database credentials;
 - a shared WebSocket fan-out layer if running multiple server replicas;

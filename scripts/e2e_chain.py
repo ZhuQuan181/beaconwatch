@@ -172,7 +172,16 @@ async def main() -> int:
     app.state.bus = None
     app.state.subscriber = subscriber
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+    headers: dict[str, str] = {}
+    if base_settings.api_token is not None:
+        headers["Authorization"] = (
+            f"Bearer {base_settings.api_token.get_secret_value()}"
+        )
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://t",
+        headers=headers,
+    ) as client:
         response = await client.get("/observations", params={"limit": 50})
         response.raise_for_status()
         rows = [

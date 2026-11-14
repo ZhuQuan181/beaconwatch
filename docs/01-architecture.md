@@ -32,8 +32,8 @@ BeaconWatch 接收无人机广播的 Remote ID（ASTM F3411 / Open Drone ID）�
 │        validation → dedup → per-station rate control                  │
 │                          │                                            │
 │                          ▼                                            │
-│           SQLite outbox → aiomqtt publisher                           │
-│           QoS wait / timeout re-queue / bounded eviction              │
+│      supervised receivers → SQLite outbox → MQTT publisher            │
+│      restart/backoff      QoS wait / timeout / bounded eviction        │
 └──────────────────────────┬───────────────────────────────────────────┘
                            │ rid/v1/{station}/obs
                            │ rid/v1/{station}/info
@@ -67,7 +67,8 @@ BeaconWatch 接收无人机广播的 Remote ID（ASTM F3411 / Open Drone ID）�
 │ live map / drone list / replay timeline / alerts / station coverage   │
 └──────────────────────────────────────────────────────────────────────┘
 
-未使用：Redis、PostGIS、JWT、mTLS、MQTT ACL 配置、服务端多副本共享总线。
+未使用：Redis、PostGIS、JWT/RBAC、MQTT ACL 配置、服务端多副本共享总线。
+可选 Bearer token 与 MQTT TLS 已实现，但不替代完整的身份/授权系统。
 ```
 
 ## 3. 已实现的协议链路
@@ -129,6 +130,8 @@ BeaconWatch 接收无人机广播的 Remote ID（ASTM F3411 / Open Drone ID）�
 
 - SQLite 是单节点本地队列，不是跨节点事务系统。
 - 发射速率上限是软上限；极端突发下仍可能经过队列缓冲。
+- Wi-Fi/BLE 接收器由监督任务管理，异常退出后会按指数退避重建；硬件彻底
+  失效时仍会持续重试，需要日志/外部告警发现长期不可用。
 
 ## 6. 服务端行为
 
@@ -137,9 +140,10 @@ BeaconWatch 接收无人机广播的 Remote ID（ASTM F3411 / Open Drone ID）�
 1. 解析 MQTT topic 和 JSON；
 2. Pydantic 校验 `DroneObservation`；
 3. 先 upsert station，满足外键；
-4. upsert drone 汇总；
-5. 插入 observation；重复键不重复计数；
-6. 提交后执行告警规则并推送 WebSocket。
+4. 确保 drone 占位行存在，满足观察表外键；
+5. 插入 observation；只有真正插入的新行才更新 drone 汇总；
+6. 重复消息直接结束，不重复计数、告警或推送；
+7. 提交后执行告警规则并推送 WebSocket。
 
 ### 站点心跳
 
@@ -162,22 +166,34 @@ BeaconWatch 接收无人机广播的 Remote ID（ASTM F3411 / Open Drone ID）�
 - `GET /drones/unidentified`
 - `GET /drones/{drone_id}`
 - `GET /observations`
+- `GET /observations/page`
 - `GET /zones`, `PUT /zones/{zone_id}`
 - `GET /alerts`
 - `WS /ws/observations`
 - `GET /health/live`, `GET /health/ready`, `GET /healthz`
 - `GET /metrics`
 
-WebSocket 推送两类 frame：
+`GET /observations` 在还有下一页时返回 `X-Next-Cursor`，也接受
+`cursor=`；`/observations/page` 返回 `{items, next_cursor}`。游标基于
+`(received_at, observation_id)`，避免深 offset 扫描和翻页期间的新数据漂移。
+
+WebSocket 推送以下 frame：
 
 ```json
 {"type": "obs", "data": {"...": "DroneObservation"}}
 {"type": "alert", "data": {"...": "Alert"}}
+{"type": "ping"}
 ```
+
+客户端可以发送 `{"type":"ping"}`，服务端回复 `{"type":"pong"}`。服务端按
+`RID_WS_PING_INTERVAL_S` 定时 ping，浏览器据此检测半开连接并重连。
 
 ## 7. 前端
 
 - WebSocket 只保留最近 200 条实时观测；
+- HTTP GET 有 8 秒超时、最多 2 次指数退避重试，并支持 AbortController；
+- 页面隐藏时停止 presence/health 轮询，回到前台立即刷新；
+- WebSocket 45 秒收不到任何 frame 时主动关闭并重连；
 - 历史时间轴使用 REST 查询，不把完整数据库复制进浏览器；
 - 历史/未识别列表按固定 4 秒节流刷新，避免每条 WS 消息触发一次大查询；
 - 地图弹窗使用 DOM `textContent`/`setDOMContent`，不把无人机字段拼进 HTML；
@@ -187,6 +203,8 @@ WebSocket 推送两类 frame：
 
 - TimescaleDB extension 与 `observations` hypertable；
 - 经纬度使用普通 Float 列和组合索引，不依赖 PostGIS；
+- 最近站点、station/operator 时间窗和 `(received_at, observation_id)` 游标
+  查询都有对应索引；
 - geofence polygon 以 JSON/JSONB 保存，API、规则引擎和地图读取同一份几何；
 - Alembic 在容器启动时自动执行 `upgrade head`。
 
@@ -194,16 +212,18 @@ WebSocket 推送两类 frame：
 
 - `/health/live`：进程存活，不访问数据库；
 - `/health/ready`：执行 `SELECT 1`，数据库不可用返回 503；
-- `/metrics`：MQTT 连接、接收/入库/非法消息、重连、站点心跳、WS 客户端数。
+- `/metrics`：MQTT 连接、接收/入库/重复/非法消息、重连、站点心跳、WS
+  客户端/丢弃帧、HTTP 请求/耗时/状态码/鉴权失败和进程 uptime。
 
 ## 10. 安全现状与生产限制
 
-当前 API 和 MQTT 没有内建身份认证；Compose 使用开发凭据和明文 MQTT。
-在公网或不可信网络部署前必须补齐：
+当前 API 支持可选的单个共享 Bearer token，服务端 MQTT 客户端支持校验
+TLS；Compose 默认仍是开发凭据和明文 MQTT。在公网或不可信网络部署前
+必须补齐：
 
-1. API 登录、RBAC、审计日志；
+1. 用户登录、RBAC、审计日志和 token 轮换（共享 token 只适合单租户/受信网络）；
 2. HTTPS/WSS 反向代理；
-3. MQTT TLS、每站客户端证书/账号和 topic ACL；
+3. MQTT ACL、每站客户端证书/账号和 Broker 侧 TLS 配置；
 4. 密钥管理、数据库最小权限、非默认密码；
 5. 多副本时用 Redis/NATS 等共享总线替代进程内 `ObservationBus`；
 6. 告警持久化、确认/关闭流程和通知集成。
@@ -223,7 +243,7 @@ docs/       架构、部署、测试文档
 
 ## 12. 后续优先级
 
-1. API 鉴权、MQTT TLS/ACL 与密钥管理；
+1. RBAC/审计、MQTT ACL、密钥轮换与生产 TLS 渗透测试；
 2. 多站定位/时差融合与轨迹质量评分；
 3. 告警持久化、确认流程和通知渠道；
 4. 多副本共享 WebSocket 总线；

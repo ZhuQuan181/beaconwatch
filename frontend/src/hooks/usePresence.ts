@@ -22,33 +22,67 @@ export function usePresence() {
 
   useEffect(() => {
     let alive = true;
-    const tick = () => {
-      // 1h window (server caps `online_within_s` at 3600).
-      //
-      // The sidebar/header are now driven by `latestDrones` (the WS
-      // `recent` stream), not the registry, so this 1h value only
-      // affects the *detail* payload of the registry (pilot/operator
-      // IDs, last station, observation count).  We keep the window
-      // tight because the registry is meant to reflect "currently
-      // operating" drones — not a 24h historical list.
-      Promise.all([
-        api.listStations(),
-        api.listDrones({ onlineWithinS: 3600 }),
-      ])
-        .then(([stations, drones]) => {
-          if (!alive) return;
-          setState((s) => ({ ...s, stations, drones, error: null, tick: s.tick + 1 }));
-        })
-        .catch((e) => {
-          if (!alive) return;
-          setState((s) => ({ ...s, error: (e as Error).message }));
-        });
-    };
-    tick();
-    const h = setInterval(tick, POLL_MS);
+    let running = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let controller: AbortController | null = null;
+
+    function schedule() {
+      if (!alive || document.visibilityState === "hidden") return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => void load(), POLL_MS);
+    }
+
+    async function load() {
+      if (!alive || running || document.visibilityState === "hidden") return;
+      running = true;
+      controller?.abort();
+      const current = new AbortController();
+      controller = current;
+      try {
+        // The sidebar/header are driven by the WS stream; the registry
+        // adds detail fields such as station assignment and operator IDs.
+        const [stations, drones] = await Promise.all([
+          api.listStations(current.signal),
+          api.listDrones({ onlineWithinS: 3600 }, current.signal),
+        ]);
+        if (!alive || current.signal.aborted) return;
+        setState((s) => ({
+          ...s,
+          stations,
+          drones,
+          error: null,
+          tick: s.tick + 1,
+        }));
+      } catch (error) {
+        if (!alive || current.signal.aborted) return;
+        setState((s) => ({ ...s, error: (error as Error).message }));
+      } finally {
+        if (controller === current) controller = null;
+        running = false;
+        schedule();
+      }
+    }
+
+    function onVisibilityChange() {
+      if (document.visibilityState === "hidden") {
+        controller?.abort();
+        controller = null;
+        if (timer) clearTimeout(timer);
+        timer = null;
+        return;
+      }
+      if (timer) clearTimeout(timer);
+      timer = null;
+      void load();
+    }
+
+    void load();
+    document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
       alive = false;
-      clearInterval(h);
+      controller?.abort();
+      if (timer) clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, []);
 

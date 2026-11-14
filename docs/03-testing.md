@@ -23,6 +23,7 @@ PYTHONPATH=edge/src .venv/bin/python -m pytest -q edge/tests
 - `WifiReceiver` 和 `BLEReceiver` 的字节提取；
 - 去重、ULID、退避、观测模型；
 - SQLite outbox、QoS 确认等待、超时回填和容量淘汰。
+- 接收器失败后的监督重启、停止事件和帧不丢失。
 
 ### 服务端单元/集成测试
 
@@ -33,11 +34,14 @@ PYTHONPATH=server/src .venv/bin/python -m pytest -q server/tests
 使用内存 SQLite 和 FastAPI ASGI transport，覆盖：
 
 - 入库、幂等、drone 聚合、站点心跳；
-- REST 查询、时间窗口、bbox、未识别过滤；
-- WebSocket fan-out；
+- 乱序观测不倒退 last_seen、重复消息不重复计数/下发；
+- REST 查询、时间窗口、bbox、未识别过滤、游标分页；
+- 可选 Bearer 鉴权、请求 ID、安全响应头；
+- WebSocket 心跳、fan-out、慢消费者丢弃策略；
 - 禁飞区/限高/未识别告警；
 - 稳定 alert ID；
 - health/readiness/metrics；
+- MQTT TLS 上下文与证书配对校验；
 - 操作员位置、精度、RSSI 在 DB 和 HTTP 之间的保真。
 
 ### 跨包契约测试
@@ -103,6 +107,7 @@ https://github.com/opendroneid/opendroneid-core-c
 
 - Python 3.11：安装、`pip check`、Ruff、edge/server/contract 测试；
 - Node 22：`npm ci`、生产依赖安全审计、TypeScript、生产构建；
+- Node 22：真实构建和 mock/Pages 构建；
 - Docker：Compose 配置校验和服务端镜像构建。
 
 推送 `v*` tag 时，`.github/workflows/release.yml` 会再次执行测试和前端构建，

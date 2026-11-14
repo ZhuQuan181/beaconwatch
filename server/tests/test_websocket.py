@@ -9,7 +9,9 @@ import websockets
 from conftest import make_obs
 from rid_server.app import create_app
 from rid_server.bus import ObservationBus
+from rid_server.config import Settings
 from rid_server.mqtt_subscriber import MqttSubscriber
+from websockets.exceptions import InvalidStatus
 
 
 async def test_websocket_receives_published_observation(
@@ -112,6 +114,72 @@ async def test_websocket_slow_consumer_does_not_block_publisher(
     newest = slow_q._queue[-1]
     assert newest["kind"] == "obs"
     assert newest["data"]["observation_id"] == obs.observation_id
+
+
+async def test_websocket_sends_server_heartbeat(
+    db_engine, _sqlite_settings, unused_tcp_port: int
+):
+    import uvicorn
+
+    app = create_app()
+    app.state.settings = Settings().model_copy(
+        update={"ws_ping_interval_s": 0.1}
+    )
+    config = uvicorn.Config(
+        app, host="127.0.0.1", port=unused_tcp_port, log_level="warning"
+    )
+    server = uvicorn.Server(config)
+    server_task = asyncio.create_task(server.serve())
+    try:
+        for _ in range(50):
+            if server.started:
+                break
+            await asyncio.sleep(0.05)
+        assert server.started
+        async with websockets.connect(
+            f"ws://127.0.0.1:{unused_tcp_port}/ws/observations"
+        ) as ws:
+            frame = json.loads(
+                await asyncio.wait_for(ws.recv(), timeout=2.0)
+            )
+        assert frame == {"type": "ping"}
+    finally:
+        server.should_exit = True
+        await asyncio.wait_for(server_task, timeout=2.0)
+
+
+async def test_websocket_requires_bearer_subprotocol_when_configured(
+    db_engine, _sqlite_settings, unused_tcp_port: int
+):
+    import uvicorn
+
+    app = create_app()
+    app.state.settings = Settings(api_token="ws-secret")
+    config = uvicorn.Config(
+        app, host="127.0.0.1", port=unused_tcp_port, log_level="warning"
+    )
+    server = uvicorn.Server(config)
+    server_task = asyncio.create_task(server.serve())
+    url = f"ws://127.0.0.1:{unused_tcp_port}/ws/observations"
+    try:
+        for _ in range(50):
+            if server.started:
+                break
+            await asyncio.sleep(0.05)
+        assert server.started
+        with pytest.raises(InvalidStatus) as rejected:
+            async with websockets.connect(url):
+                pass
+        assert rejected.value.response.status_code == 403
+
+        async with websockets.connect(
+            url,
+            subprotocols=["rid.v1", "bearer.ws-secret"],
+        ) as ws:
+            assert ws.subprotocol == "rid.v1"
+    finally:
+        server.should_exit = True
+        await asyncio.wait_for(server_task, timeout=2.0)
 
 
 @pytest.fixture

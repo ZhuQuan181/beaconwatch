@@ -249,3 +249,41 @@ async def test_stats_reflect_state(settings: Settings) -> None:
         assert pub.stats["connected"] == 1
     finally:
         await pub.stop()
+
+
+async def test_tls_settings_are_forwarded_to_paho(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class FakePahoClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self.on_connect = None
+            self.on_disconnect = None
+
+        def tls_set(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr("rid_edge.mqtt_publisher.PahoClient", FakePahoClient)
+    ca = tmp_path / "ca.pem"
+    cert = tmp_path / "client.crt"
+    key = tmp_path / "client.key"
+    settings = Settings(
+        station_id="TLS-STATION",
+        mqtt_host="broker.example",
+        mqtt_port=8883,
+        mqtt_use_tls=True,
+        mqtt_ca_cert=ca,
+        mqtt_client_cert=cert,
+        mqtt_client_key=key,
+        buffer_db_path=tmp_path / "buffer.sqlite3",
+    )
+    pub = MQTTPublisher(settings)
+    try:
+        assert captured == {
+            "ca_certs": str(ca),
+            "certfile": str(cert),
+            "keyfile": str(key),
+        }
+    finally:
+        await pub.stop()

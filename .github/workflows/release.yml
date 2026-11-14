@@ -39,6 +39,7 @@ jobs:
           npm ci
           npm audit --omit=dev --audit-level=high
           npm run build
+          npm run build:mock
 
       - name: Publish GitHub release
         env:

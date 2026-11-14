@@ -17,33 +17,16 @@ import asyncio
 import contextlib
 import signal
 import sys
+from collections.abc import Callable
 
 from rid_edge.common.config import get_settings
 from rid_edge.common.logger import configure_logging, get_logger
 from rid_edge.mqtt_publisher import MQTTPublisher
 from rid_edge.pipeline import PipelineManager
 from rid_edge.receivers import BLEReceiver, Receiver, WifiReceiver
+from rid_edge.supervisor import ReceiverSupervisor
 
 log = get_logger(__name__)
-
-
-async def _run_receiver(
-    name: str,
-    rx: Receiver,
-    queue: asyncio.Queue,
-) -> None:
-    """Consume a receiver and push RawFrames into a shared queue."""
-    await rx.start()
-    try:
-        async for frame in rx.frames():
-            try:
-                queue.put_nowait(frame)
-            except asyncio.QueueFull:
-                log.warning("frame_queue_full", receiver=name)
-    except Exception as exc:
-        log.exception("receiver_crashed", receiver=name, error=str(exc))
-    finally:
-        await rx.stop()
 
 
 async def _run_parser(
@@ -118,11 +101,11 @@ async def main() -> int:
     )
 
     # ---- receivers -----------------------------------------------
-    receivers: list[tuple[str, Receiver]] = []
+    receiver_specs: list[tuple[str, Callable[[], Receiver]]] = []
     if settings.wifi_enabled:
-        receivers.append((
+        receiver_specs.append((
             "wifi",
-            WifiReceiver(
+            lambda: WifiReceiver(
                 interface=settings.wifi_interface,
                 channel_hop=settings.wifi_channel_hop,
                 fixed_channel=settings.wifi_fixed_channel,
@@ -130,9 +113,9 @@ async def main() -> int:
             ),
         ))
     if settings.ble_enabled:
-        receivers.append((
+        receiver_specs.append((
             "ble",
-            BLEReceiver(
+            lambda: BLEReceiver(
                 scan_interval_s=settings.ble_scan_interval_s,
                 scan_window_s=settings.ble_scan_window_s,
                 rssi_min_dbm=settings.ble_rssi_min_dbm,
@@ -142,6 +125,8 @@ async def main() -> int:
     publisher = MQTTPublisher(settings)
     await publisher.start()
 
+    stop = asyncio.Event()
+    supervisors: list[ReceiverSupervisor] = []
     tasks = [
         asyncio.create_task(_run_heartbeat(publisher, settings), name="heartbeat"),
         asyncio.create_task(
@@ -150,11 +135,21 @@ async def main() -> int:
         ),
         asyncio.create_task(_run_publisher(publisher, obs_queue), name="publisher"),
     ]
-    for name, rx in receivers:
-        tasks.append(asyncio.create_task(_run_receiver(name, rx, frame_queue), name=f"rx:{name}"))
+    for name, factory in receiver_specs:
+        supervisor = ReceiverSupervisor(
+            name,
+            factory,
+            frame_queue,
+            stop,
+            base_backoff_s=settings.receiver_backoff_base_s,
+            max_backoff_s=settings.receiver_backoff_max_s,
+        )
+        supervisors.append(supervisor)
+        tasks.append(
+            asyncio.create_task(supervisor.run(), name=f"rx:{name}")
+        )
 
     # ---- signal handling ----------------------------------------
-    stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         with contextlib.suppress(NotImplementedError):
@@ -162,7 +157,10 @@ async def main() -> int:
 
     log.info("running", task_count=len(tasks))
     await stop.wait()
-    log.info("shutting_down")
+    log.info(
+        "shutting_down",
+        receiver_stats={supervisor.name: supervisor.stats for supervisor in supervisors},
+    )
 
     for t in tasks:
         t.cancel()

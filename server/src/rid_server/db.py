@@ -114,6 +114,10 @@ class Drone(Base):
     last_station_id: Mapped[str] = mapped_column(String(64), nullable=False)
     observation_count: Mapped[int] = mapped_column(BigInteger, default=0)
 
+    __table_args__ = (
+        Index("ix_drones_last_seen", "last_seen"),
+    )
+
 
 class Observation(Base):
     """One row per received ``RidObservation`` from the edge."""
@@ -173,6 +177,21 @@ class Observation(Base):
             "ix_observations_lat_lon",
             "position_lat",
             "position_lon",
+        ),
+        Index(
+            "ix_observations_received_observation",
+            "received_at",
+            "observation_id",
+        ),
+        Index(
+            "ix_observations_station_received",
+            "station_id",
+            "received_at",
+        ),
+        Index(
+            "ix_observations_operator_received",
+            "operator_id",
+            "received_at",
         ),
     )
 

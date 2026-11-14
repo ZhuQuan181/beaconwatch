@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import ssl
 from datetime import datetime, timezone
 from typing import Any
 
@@ -36,6 +37,7 @@ class MqttSubscriber:
 
     def __init__(self, settings: Settings | None = None) -> None:
         self._settings = settings or get_settings()
+        self._tls_context = self._build_tls_context()
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
         # Optional callback invoked after a successful DB persist.  The
@@ -54,6 +56,7 @@ class MqttSubscriber:
         # Operational counters
         self.received = 0
         self.persisted = 0
+        self.duplicates = 0
         self.station_infos = 0
         self.invalid = 0
         self.reconnects = 0
@@ -83,33 +86,38 @@ class MqttSubscriber:
                 log.info(
                     "mqtt.connect", host=self._settings.mqtt_host,
                     port=self._settings.mqtt_port,
+                    tls=self._settings.mqtt_tls,
                 )
-                async with aiomqtt.Client(
-                    hostname=self._settings.mqtt_host,
-                    port=self._settings.mqtt_port,
-                    username=self._settings.mqtt_username or None,
-                    password=self._settings.mqtt_password or None,
-                    identifier=self._settings.mqtt_client_id,
-                ) as client:
-                    await client.subscribe(
-                        self._settings.mqtt_obs_topic,
-                        qos=self._settings.mqtt_qos,
-                    )
-                    await client.subscribe(
-                        self._settings.mqtt_info_topic,
-                        qos=self._settings.mqtt_qos,
-                    )
-                    log.info(
-                        "mqtt.subscribed",
-                        obs_topic=self._settings.mqtt_obs_topic,
-                        info_topic=self._settings.mqtt_info_topic,
-                    )
-                    self.connected = True
-                    backoff = 1.0  # reset on successful connect
-                    async for message in client.messages:
-                        if self._stop.is_set():
-                            break
-                        await self.handle_message(message.topic, message.payload)
+                try:
+                    async with aiomqtt.Client(
+                        hostname=self._settings.mqtt_host,
+                        port=self._settings.mqtt_port,
+                        username=self._settings.mqtt_username or None,
+                        password=self._settings.mqtt_password or None,
+                        identifier=self._settings.mqtt_client_id,
+                        tls_context=self._tls_context,
+                    ) as client:
+                        await client.subscribe(
+                            self._settings.mqtt_obs_topic,
+                            qos=self._settings.mqtt_qos,
+                        )
+                        await client.subscribe(
+                            self._settings.mqtt_info_topic,
+                            qos=self._settings.mqtt_qos,
+                        )
+                        log.info(
+                            "mqtt.subscribed",
+                            obs_topic=self._settings.mqtt_obs_topic,
+                            info_topic=self._settings.mqtt_info_topic,
+                        )
+                        self.connected = True
+                        backoff = 1.0  # reset on successful connect
+                        async for message in client.messages:
+                            if self._stop.is_set():
+                                break
+                            await self.handle_message(message.topic, message.payload)
+                finally:
+                    self.connected = False
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # broker down, network blip, etc.
@@ -165,7 +173,15 @@ class MqttSubscriber:
             # Upsert station FIRST so observations FK is satisfied.
             # ``touch_station`` is an idempotent upsert.
             await touch_station(session, obs.station_id, online=True)
-            await write_observation(session, obs)
+            inserted = await write_observation(session, obs)
+        if not inserted:
+            self.duplicates += 1
+            log.debug(
+                "obs.duplicate",
+                drone_id=obs.drone_id,
+                observation_id=obs.observation_id,
+            )
+            return
         self.persisted += 1
 
         # Evaluate rules only after the row is committed: an alert that
@@ -268,3 +284,20 @@ class MqttSubscriber:
         if not parts[1].startswith("v"):
             return None
         return parts[2]
+
+    def _build_tls_context(self) -> ssl.SSLContext | None:
+        """Build a verified TLS context when ``mqtt_tls`` is enabled."""
+        if not self._settings.mqtt_tls:
+            return None
+        context = ssl.create_default_context(
+            cafile=self._settings.mqtt_ca_cert or None
+        )
+        cert = self._settings.mqtt_client_cert
+        key = self._settings.mqtt_client_key
+        if bool(cert) != bool(key):
+            raise ValueError(
+                "RID_MQTT_CLIENT_CERT and RID_MQTT_CLIENT_KEY must be set together"
+            )
+        if cert and key:
+            context.load_cert_chain(certfile=cert, keyfile=key)
+        return context
