@@ -33,7 +33,10 @@ export function ObservationList({ observations, selectedDroneId, onSelect }: Pro
             onClick={() => onSelect?.(o.drone_id)}
           >
             <div className="obs-row-1">
-              <span className="drone-id">{o.drone_id}</span>
+              <span className={`drone-id ${o.operator_id ? "" : "ghost"}`}>
+                {o.operator_id ? "" : "⚠ "}
+                {o.drone_id}
+              </span>
               <span className={`tag proto-${o.protocol}`}>{o.protocol}</span>
             </div>
             <div className="obs-row-2">

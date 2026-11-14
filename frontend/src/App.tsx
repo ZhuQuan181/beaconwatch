@@ -236,6 +236,7 @@ export function App() {
         stations={stations}
         observations={displayed}
         zones={zones}
+        selectedDroneId={selected}
         onDroneClick={handleDroneClick}
       />
 

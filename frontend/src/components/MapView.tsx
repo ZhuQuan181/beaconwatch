@@ -30,6 +30,7 @@ interface Props {
   stations: Station[];
   observations: DroneObservation[];
   zones?: GeofenceZone[];
+  selectedDroneId?: string | null;
   onDroneClick?: (droneId: string) => void;
 }
 
@@ -120,6 +121,8 @@ function observationsToGeoJSON(obs: DroneObservation[]): GeoJSON.FeatureCollecti
         station_id: o.station_id,
         protocol: o.protocol,
         alt_m: o.position.alt_m,
+        speed_mps: o.position.speed_mps,
+        heading_deg: o.position.heading_deg,
         received_at: o.received_at,
         // A drone with no operator ID is the interesting one; bake it
         // into the feature so the paint expression can style it.
@@ -238,7 +241,13 @@ function trailsToGeoJSON(obs: DroneObservation[]): GeoJSON.FeatureCollection {
   return { type: "FeatureCollection", features };
 }
 
-export function MapView({ stations, observations, zones = [], onDroneClick }: Props) {
+export function MapView({
+  stations,
+  observations,
+  zones = [],
+  selectedDroneId = null,
+  onDroneClick,
+}: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MlMap | null>(null);
   const fittedRef = useRef(false);
@@ -419,6 +428,40 @@ export function MapView({ stations, observations, zones = [], onDroneClick }: Pr
           "circle-stroke-color": "#0b0d12",
         },
       });
+      // Selection ring — a separate layer because colour already encodes
+      // "is this drone a ghost". Reusing colour for selection would make
+      // the two meanings indistinguishable.
+      map.addSource("selected", {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+      });
+      map.addLayer({
+        id: "selected-ring",
+        type: "circle",
+        source: "selected",
+        paint: {
+          "circle-radius": 15,
+          "circle-color": "transparent",
+          // Two-tone ring: white core with a dark halo.  A single white
+          // stroke disappeared over the amber no-fly fill, and a single
+          // dark one disappeared over the dark basemap.
+          "circle-stroke-width": 3,
+          "circle-stroke-color": "#ffffff",
+          "circle-stroke-opacity": 0.95,
+        },
+      });
+      map.addLayer({
+        id: "selected-ring-outer",
+        type: "circle",
+        source: "selected",
+        paint: {
+          "circle-radius": 18,
+          "circle-color": "transparent",
+          "circle-stroke-width": 1,
+          "circle-stroke-color": "#0b0d12",
+          "circle-stroke-opacity": 0.6,
+        },
+      });
       map.on("click", "drones-dot", (e) => {
         const f = e.features?.[0];
         const id = f?.properties?.drone_id as string | undefined;
@@ -426,10 +469,48 @@ export function MapView({ stations, observations, zones = [], onDroneClick }: Pr
         const cb = onDroneClickRef.current;
         if (id && cb) cb(id);
       });
-      map.on("mouseenter", "drones-dot", () => {
+
+      // Hover card.  Built on Popup rather than a React overlay so it
+      // tracks the map during pan/zoom without a re-render per frame.
+      const hover = new maplibregl.Popup({
+        closeButton: false,
+        closeOnClick: false,
+        offset: 12,
+        className: "drone-hover",
+      });
+      map.on("mouseenter", "drones-dot", (e) => {
+        const f = e.features?.[0];
+        if (!f) return;
+        const p = f.properties ?? {};
+        const ghost = Boolean(p.unidentified);
+        const alt = Number(p.alt_m ?? 0);
+        const speed = Number(p.speed_mps ?? 0);
+        hover
+          .setLngLat((f.geometry as GeoJSON.Point).coordinates as [number, number])
+          .setHTML(
+            `<div class="dh">
+               <div class="dh-id">${String(p.drone_id ?? "")}</div>
+               <div class="dh-row"><span>高度</span><b>${alt.toFixed(0)} m</b></div>
+               <div class="dh-row"><span>速度</span><b>${speed.toFixed(1)} m/s</b></div>
+               <div class="dh-row"><span>协议</span><b>${String(p.protocol ?? "")}</b></div>
+               <div class="dh-flag ${ghost ? "ghost" : "ok"}">
+                 ${ghost ? "未广播操作员 ID" : "已识别"}
+               </div>
+             </div>`,
+          )
+          .addTo(map);
         map.getCanvas().style.cursor = "pointer";
       });
+      map.on("mousemove", "drones-dot", (e) => {
+        const f = e.features?.[0];
+        if (f) {
+          hover.setLngLat(
+            (f.geometry as GeoJSON.Point).coordinates as [number, number],
+          );
+        }
+      });
       map.on("mouseleave", "drones-dot", () => {
+        hover.remove();
         map.getCanvas().style.cursor = "";
       });
     });
@@ -475,7 +556,18 @@ export function MapView({ stations, observations, zones = [], onDroneClick }: Pr
     if (!m || observations.length === 0) return;
     const apply = () => {
       const src = m.getSource("drones") as GeoJSONSource | undefined;
-      src?.setData(observationsToGeoJSON(observations));
+      // One dot per drone: the latest fix.  Drawing every historical fix
+      // piled 50 overlapping circles into a string of beads that hid the
+      // actual contact.  History belongs to the trail layer, position
+      // belongs to the dot.
+      const latestByDrone = new Map<string, DroneObservation>();
+      for (const o of observations) {
+        const prev = latestByDrone.get(o.drone_id);
+        if (!prev || Date.parse(o.received_at) > Date.parse(prev.received_at)) {
+          latestByDrone.set(o.drone_id, o);
+        }
+      }
+      src?.setData(observationsToGeoJSON([...latestByDrone.values()]));
       const trailSrc = m.getSource("trails") as GeoJSONSource | undefined;
       trailSrc?.setData(trailsToGeoJSON(observations));
       if (!fittedRef.current) {
@@ -515,6 +607,36 @@ export function MapView({ stations, observations, zones = [], onDroneClick }: Pr
     if (m.isStyleLoaded()) apply();
     else m.once("load", apply);
   }, [observations, zones, stations]);
+
+  // Push the selection ring.
+  useEffect(() => {
+    const m = mapRef.current;
+    if (!m) return;
+    const apply = () => {
+      const src = m.getSource("selected") as GeoJSONSource | undefined;
+      if (!src) return;
+      const hit = selectedDroneId
+        ? observations.find((o) => o.drone_id === selectedDroneId)
+        : undefined;
+      src.setData({
+        type: "FeatureCollection",
+        features: hit
+          ? [
+              {
+                type: "Feature",
+                geometry: {
+                  type: "Point",
+                  coordinates: [hit.position.lon, hit.position.lat],
+                },
+                properties: {},
+              },
+            ]
+          : [],
+      });
+    };
+    if (m.isStyleLoaded()) apply();
+    else m.once("load", apply);
+  }, [selectedDroneId, observations]);
 
   return <div ref={containerRef} className="map-container" />;
 }

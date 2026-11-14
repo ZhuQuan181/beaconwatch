@@ -455,3 +455,53 @@ header.topbar .stat--replay {
   font-variant-numeric: tabular-nums;
   margin-top: 1px;
 }
+
+/* ── Ghost drone marker in the sidebar ───────────────────────────
+   Same red as the map dot, so the list and the map agree on which
+   contact is the problem. */
+.drone-id.ghost {
+  color: #ff8b84;
+}
+.obs-row:hover .drone-id.ghost { color: #ffb3ad; }
+
+/* ── Hover card ───────────────────────────────────────────────── */
+.maplibregl-popup.drone-hover .maplibregl-popup-content {
+  background: #11141b;
+  border: 1px solid #2a3142;
+  border-radius: 3px;
+  padding: 9px 11px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .5);
+  font: 12px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+.maplibregl-popup.drone-hover .maplibregl-popup-tip {
+  border-top-color: #2a3142;
+}
+.dh { min-width: 148px; }
+.dh-id {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-size: 11px;
+  color: #d5dbe7;
+  margin-bottom: 5px;
+  word-break: break-all;
+}
+.dh-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  font-size: 11.5px;
+  color: #8a94a6;
+  padding: 1px 0;
+}
+.dh-row b {
+  font-weight: 500;
+  color: #cdd4e0;
+  font-variant-numeric: tabular-nums;
+}
+.dh-flag {
+  margin-top: 6px;
+  padding-top: 5px;
+  border-top: 1px solid #222839;
+  font-size: 11px;
+}
+.dh-flag.ok { color: #38d39f; }
+.dh-flag.ghost { color: #ff8b84; }
