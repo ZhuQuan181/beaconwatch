@@ -26,13 +26,25 @@ export const api = {
     const qs = q.toString();
     return jsonGet<DroneSummary[]>(`/drones${qs ? `?${qs}` : ""}`);
   },
-  listObservations: (params: { limit?: number; droneId?: string } = {}) => {
+  listObservations: (
+    params: {
+      limit?: number;
+      droneId?: string;
+      from?: string;
+      to?: string;
+      unidentifiedOnly?: boolean;
+    } = {},
+  ) => {
     const q = new URLSearchParams();
     if (params.limit !== undefined) q.set("limit", String(params.limit));
     if (params.droneId) q.set("drone_id", params.droneId);
+    if (params.from) q.set("from", params.from);
+    if (params.to) q.set("to", params.to);
+    if (params.unidentifiedOnly) q.set("unidentified_only", "true");
     const qs = q.toString();
     return jsonGet<DroneObservation[]>(
       `/observations${qs ? `?${qs}` : ""}`,
     );
   },
+  listUnidentified: () => jsonGet<string[]>("/drones/unidentified"),
 };

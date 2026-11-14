@@ -1,7 +1,8 @@
 .app {
   display: grid;
   grid-template-columns: 360px 1fr;
-  grid-template-rows: 48px 1fr;
+  /* topbar / map+sidebar / timeline */
+  grid-template-rows: 48px 1fr 46px;
   height: 100vh;
   background: #0b0d12;
   color: #e6e9ef;
@@ -186,4 +187,162 @@ aside.sidebar h2 {
 }
 .dot.offline {
   background: #6f7a8c;
+}
+
+/* ── Timeline ─────────────────────────────────────────────────────
+   Occupies the full width under the map.  In replay the whole left/
+   bottom edge turns amber so an operator can never mistake a frozen
+   frame for live traffic — that's the one failure mode of a scrubber
+   that actually matters. */
+.timeline {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: 108px 1fr 132px;
+  align-items: center;
+  gap: 14px;
+  padding: 0 16px;
+  background: #11141b;
+  border-top: 1px solid #1c2030;
+  font-size: 12px;
+}
+
+.app--replay .timeline {
+  border-top-color: #6b4a12;
+  background: #1a150c;
+}
+
+.timeline--empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.tl-hint {
+  color: #6f7a8c;
+  font-size: 11.5px;
+}
+
+.tl-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px 3px 7px;
+  background: transparent;
+  border: 1px solid #2a3142;
+  border-radius: 3px;
+  color: #9aa3b2;
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.tl-mode:hover { border-color: #3d4658; color: #cdd4e0; }
+.tl-mode.is-replay {
+  border-color: #7a5514;
+  color: #f0b429;
+  background: rgba(240, 180, 41, .08);
+}
+
+.tl-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #6f7a8c;
+}
+.tl-dot.live { background: #38d39f; box-shadow: 0 0 0 3px rgba(56, 211, 159, .15); }
+.tl-dot.replay { background: #f0b429; }
+
+.tl-track {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 100%;
+}
+.tl-track input[type="range"] {
+  width: 100%;
+  /* Pull the thumb above the ghost marker's hit area but keep the
+     marker clickable: the marker is a 10px button, the input is
+     full-width, so raise the input above it and put the marker
+     underneath visually at z-index 0. */
+  appearance: none;
+  background: transparent;
+  height: 18px;
+  cursor: pointer;
+}
+.tl-track input[type="range"]::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 2px;
+  background: #242b3a;
+}
+.tl-track input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  width: 11px; height: 11px;
+  margin-top: -4px;
+  border-radius: 50%;
+  background: #5cc8ff;
+  border: 1.5px solid #0b0d12;
+}
+.app--replay .tl-track input[type="range"]::-webkit-slider-thumb {
+  background: #f0b429;
+}
+.tl-track input[type="range"]::-moz-range-track {
+  height: 3px; border-radius: 2px; background: #242b3a;
+}
+.tl-track input[type="range"]::-moz-range-thumb {
+  width: 11px; height: 11px; border: 1.5px solid #0b0d12;
+  border-radius: 50%; background: #5cc8ff;
+}
+
+/* First unidentified fix — the operator's "where did the ghost show
+   up" jump target. */
+.tl-ghost {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  width: 14px; height: 100%;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  z-index: 2;
+}
+.tl-ghost-mark {
+  display: block;
+  width: 4px; height: 4px;
+  margin: 0 auto;
+  border-radius: 50%;
+  background: #ff5c5c;
+  box-shadow: 0 0 0 2px rgba(255, 92, 92, .25);
+}
+.tl-ghost:hover .tl-ghost-mark {
+  box-shadow: 0 0 0 4px rgba(255, 92, 92, .35);
+}
+
+.tl-right {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+.tl-clock {
+  font-variant-numeric: tabular-nums;
+  color: #9aa3b2;
+  font-size: 12px;
+}
+.app--replay .tl-clock { color: #f0b429; }
+
+.tl-play {
+  width: 26px; height: 24px;
+  background: transparent;
+  border: 1px solid #2a3142;
+  border-radius: 3px;
+  color: #9aa3b2;
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+.tl-play:hover { border-color: #3d4658; color: #cdd4e0; }
+
+header.topbar .stat--replay {
+  color: #f0b429;
+  padding: 2px 8px;
+  border: 1px solid #7a5514;
+  border-radius: 3px;
+  background: rgba(240, 180, 41, .08);
 }
