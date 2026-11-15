@@ -107,7 +107,7 @@ class StationInfo(BaseModel):
     station_id: str = Field(min_length=1, max_length=64)
     location: Position
     name: str | None = Field(default=None, max_length=128)
-    firmware_version: str = Field(default="0.6.0", max_length=32)
+    firmware_version: str = Field(default="0.7.0", max_length=32)
     capabilities: list[str] = Field(default_factory=lambda: ["ble", "wifi_nan"])
 
 
@@ -143,6 +143,26 @@ class AlertOut(BaseModel):
     resolved_by: str | None = None
     resolution_note: str | None = None
     reopen_count: int = 0
+
+
+class AlertPage(BaseModel):
+    """Keyset-paginated alert ledger page."""
+
+    items: list[AlertOut]
+    next_cursor: str | None = None
+
+
+class AlertStatsOut(BaseModel):
+    """Aggregate counts for the alert ledger under the requested filters."""
+
+    total: int = 0
+    open: int = 0
+    acknowledged: int = 0
+    resolved: int = 0
+    active: int = 0
+    by_severity: dict[str, int] = Field(default_factory=dict)
+    by_rule: dict[str, int] = Field(default_factory=dict)
+    oldest_active_at: str | None = None
 
 
 class AlertAckIn(BaseModel):

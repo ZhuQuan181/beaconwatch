@@ -37,7 +37,8 @@ run the real edge/MQTT/database/API stack.
   migrations in the server container.
 - **Alert workflow:** durable open/acknowledged/resolved state machine,
   automatic recurrence reopening, operator resolution and reopen actions,
-  immutable audit events, status/rule/drone filters and live WebSocket updates.
+  immutable audit events, status/rule/drone filters, live WebSocket updates,
+  keyset-paginated history, aggregate statistics and opt-in retention cleanup.
 - **Durable notifications:** alert lifecycle transitions are written to a
   transactional outbox and delivered by a background worker as HMAC-SHA256
   signed webhooks, with leases, bounded exponential backoff, dead-lettering
@@ -109,8 +110,7 @@ untrusted network you still need:
 - HTTPS/WSS termination at a reverse proxy;
 - secret management and non-default database credentials;
 - a shared WebSocket fan-out layer if running multiple server replicas;
-- alert pagination/retention policy and full role-based access control beyond
-  the alert audit trail.
+- full role-based access control beyond the alert workflow audit trail.
 
 The current WebSocket fan-out is in-process, so a multi-replica server requires
 a shared bus such as Redis/NATS. See `docs/01-architecture.md` and

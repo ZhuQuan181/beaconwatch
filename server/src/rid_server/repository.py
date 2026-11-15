@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Sequence
 from uuid import uuid4
 
-from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy import and_, case, delete, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from ulid import ULID
@@ -654,6 +654,30 @@ async def upsert_alert(
     return row
 
 
+def _alert_filters(
+    *,
+    status: str | None,
+    rule: str | None,
+    drone_id: str | None,
+    since: datetime | None,
+    until: datetime | None,
+) -> list:
+    filters = []
+    if status == "active":
+        filters.append(AlertRecord.status.in_(("open", "acknowledged")))
+    elif status is not None:
+        filters.append(AlertRecord.status == status)
+    if rule is not None:
+        filters.append(AlertRecord.rule == rule)
+    if drone_id is not None:
+        filters.append(AlertRecord.drone_id == drone_id)
+    if since is not None:
+        filters.append(AlertRecord.triggered_at >= since)
+    if until is not None:
+        filters.append(AlertRecord.triggered_at <= until)
+    return filters
+
+
 async def list_alerts(
     session: AsyncSession,
     *,
@@ -663,28 +687,194 @@ async def list_alerts(
     drone_id: str | None = None,
     since: datetime | None = None,
     until: datetime | None = None,
+    before: tuple[datetime, str] | None = None,
 ) -> Sequence[AlertRecord]:
-    stmt = select(AlertRecord)
-    if status == "active":
-        stmt = stmt.where(
-            AlertRecord.status.in_(("open", "acknowledged"))
+    stmt = select(AlertRecord).where(
+        *_alert_filters(
+            status=status,
+            rule=rule,
+            drone_id=drone_id,
+            since=since,
+            until=until,
         )
-    elif status is not None:
-        stmt = stmt.where(AlertRecord.status == status)
-    if rule is not None:
-        stmt = stmt.where(AlertRecord.rule == rule)
-    if drone_id is not None:
-        stmt = stmt.where(AlertRecord.drone_id == drone_id)
-    if since is not None:
-        stmt = stmt.where(AlertRecord.triggered_at >= since)
-    if until is not None:
-        stmt = stmt.where(AlertRecord.triggered_at <= until)
+    )
+    if before is not None:
+        before_at, before_id = before
+        stmt = stmt.where(
+            or_(
+                AlertRecord.triggered_at < before_at,
+                and_(
+                    AlertRecord.triggered_at == before_at,
+                    AlertRecord.alert_id < before_id,
+                ),
+            )
+        )
     stmt = stmt.order_by(
         AlertRecord.triggered_at.desc(),
         AlertRecord.alert_id.desc(),
     ).limit(limit)
     result = await session.execute(stmt)
     return result.scalars().all()
+
+
+async def get_alert_stats(
+    session: AsyncSession,
+    *,
+    status: str | None = None,
+    rule: str | None = None,
+    drone_id: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+) -> dict[str, object]:
+    """Aggregate lifecycle, severity and rule counts for one filter set."""
+    filters = _alert_filters(
+        status=status,
+        rule=rule,
+        drone_id=drone_id,
+        since=since,
+        until=until,
+    )
+    active_filter = AlertRecord.status.in_(("open", "acknowledged"))
+    totals = await session.execute(
+        select(
+            func.count(AlertRecord.alert_id),
+            func.sum(
+                case((AlertRecord.status == "open", 1), else_=0)
+            ),
+            func.sum(
+                case((AlertRecord.status == "acknowledged", 1), else_=0)
+            ),
+            func.sum(
+                case((AlertRecord.status == "resolved", 1), else_=0)
+            ),
+            func.min(
+                case(
+                    (active_filter, AlertRecord.triggered_at),
+                    else_=None,
+                )
+            ),
+        ).where(*filters)
+    )
+    total, open_count, acknowledged, resolved, oldest_active = totals.one()
+    severity_rows = await session.execute(
+        select(AlertRecord.severity, func.count(AlertRecord.alert_id))
+        .where(*filters)
+        .group_by(AlertRecord.severity)
+    )
+    rule_rows = await session.execute(
+        select(AlertRecord.rule, func.count(AlertRecord.alert_id))
+        .where(*filters)
+        .group_by(AlertRecord.rule)
+    )
+    open_count = int(open_count or 0)
+    acknowledged = int(acknowledged or 0)
+    resolved = int(resolved or 0)
+    return {
+        "total": int(total or 0),
+        "open": open_count,
+        "acknowledged": acknowledged,
+        "resolved": resolved,
+        "active": open_count + acknowledged,
+        "by_severity": {
+            str(name): int(count)
+            for name, count in severity_rows.all()
+        },
+        "by_rule": {
+            str(name): int(count) for name, count in rule_rows.all()
+        },
+        "oldest_active_at": (
+            _iso(oldest_active)
+            if isinstance(oldest_active, datetime)
+            else None
+        ),
+    }
+
+
+async def purge_expired_resolved_alerts(
+    session: AsyncSession,
+    *,
+    older_than: datetime,
+    batch_size: int = 500,
+) -> int:
+    """Delete one batch of old resolved alerts with no live delivery."""
+    pending_delivery = (
+        select(NotificationOutbox.delivery_id)
+        .where(
+            NotificationOutbox.alert_id == AlertRecord.alert_id,
+            NotificationOutbox.status.in_(("pending", "delivering")),
+        )
+        .exists()
+    )
+    candidates = (
+        select(AlertRecord.alert_id)
+        .where(
+            AlertRecord.status == "resolved",
+            AlertRecord.resolved_at.is_not(None),
+            AlertRecord.resolved_at < older_than,
+            ~pending_delivery,
+        )
+        .order_by(AlertRecord.resolved_at, AlertRecord.alert_id)
+        .limit(batch_size)
+    )
+    bind = session.get_bind()
+    if bind is not None and bind.dialect.name == "postgresql":
+        candidates = candidates.with_for_update(skip_locked=True)
+    ids = list((await session.execute(candidates)).scalars().all())
+    if not ids:
+        return 0
+
+    await session.execute(
+        delete(NotificationOutbox).where(
+            NotificationOutbox.alert_id.in_(ids)
+        )
+    )
+    await session.execute(
+        delete(AlertEvent).where(AlertEvent.alert_id.in_(ids))
+    )
+    result = await session.execute(
+        delete(AlertRecord).where(AlertRecord.alert_id.in_(ids))
+    )
+    await session.commit()
+    return int(result.rowcount or len(ids))
+
+
+async def purge_expired_notifications(
+    session: AsyncSession,
+    *,
+    older_than: datetime,
+    batch_size: int = 500,
+) -> int:
+    """Delete one batch of terminal notification rows past retention."""
+    terminal_at = func.coalesce(
+        NotificationOutbox.delivered_at,
+        NotificationOutbox.updated_at,
+        NotificationOutbox.created_at,
+    )
+    candidates = (
+        select(NotificationOutbox.delivery_id)
+        .where(
+            NotificationOutbox.status.in_(("delivered", "dead")),
+            terminal_at < older_than,
+        )
+        .order_by(
+            terminal_at,
+            NotificationOutbox.delivery_id,
+        )
+        .limit(batch_size)
+    )
+    bind = session.get_bind()
+    if bind is not None and bind.dialect.name == "postgresql":
+        candidates = candidates.with_for_update(skip_locked=True)
+    ids = list((await session.execute(candidates)).scalars().all())
+    if not ids:
+        return 0
+    result = await session.execute(
+        delete(NotificationOutbox).where(
+            NotificationOutbox.delivery_id.in_(ids)
+        )
+    )
+    await session.commit()
+    return int(result.rowcount or len(ids))
 
 
 async def get_alert(

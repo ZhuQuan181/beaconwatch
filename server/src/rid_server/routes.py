@@ -29,8 +29,10 @@ from .models import (
     AlertAckIn,
     AlertEventOut,
     AlertOut,
+    AlertPage,
     AlertReopenIn,
     AlertResolveIn,
+    AlertStatsOut,
     DroneObservation,
     DroneSummary,
     GeofenceZoneOut,
@@ -38,7 +40,12 @@ from .models import (
     Position,
     Station,
 )
-from .pagination import decode_cursor, encode_cursor
+from .pagination import (
+    decode_alert_cursor,
+    decode_cursor,
+    encode_alert_cursor,
+    encode_cursor,
+)
 from .repository import (
     AlertStateConflict,
     acknowledge_alert,
@@ -46,6 +53,7 @@ from .repository import (
     alert_to_out,
     drone_to_summary,
     get_alert,
+    get_alert_stats,
     get_drone,
     list_alert_events,
     list_alerts,
@@ -197,10 +205,61 @@ def _notifications_enabled(request: Request) -> bool:
     return bool(settings and settings.notifications_enabled)
 
 
+def _decode_alert_before(
+    cursor: str | None,
+) -> tuple[datetime, str] | None:
+    if not cursor:
+        return None
+    try:
+        return decode_alert_cursor(cursor)
+    except ValueError as exc:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
+
+
+async def _read_alert_page(
+    session: AsyncSession,
+    *,
+    limit: int,
+    before: tuple[datetime, str] | None,
+    status_filter: str | None,
+    rule: str | None,
+    drone_id: str | None,
+    since: datetime | None,
+    until: datetime | None,
+) -> tuple[list, str | None]:
+    rows = await list_alerts(
+        session,
+        limit=limit + 1,
+        before=before,
+        status=status_filter,
+        rule=rule,
+        drone_id=drone_id,
+        since=since,
+        until=until,
+    )
+    visible = list(rows[:limit])
+    next_cursor = (
+        encode_alert_cursor(
+            visible[-1].triggered_at,
+            visible[-1].alert_id,
+        )
+        if len(rows) > limit and visible
+        else None
+    )
+    return visible, next_cursor
+
+
 @router.get("/alerts", response_model=list[AlertOut])
 async def get_alerts(
+    response: Response,
     session: Annotated[AsyncSession, Depends(get_session)],
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
+    cursor: Annotated[
+        str | None,
+        Query(description="Opaque keyset cursor returned in X-Next-Cursor"),
+    ] = None,
     status_filter: Annotated[
         Literal["active", "open", "acknowledged", "resolved"] | None,
         Query(alias="status", description="Lifecycle state filter"),
@@ -216,19 +275,90 @@ async def get_alerts(
     """Return the durable alert ledger, newest trigger first.
 
     ``status=active`` means open plus acknowledged.  The other status values
-    select exactly one lifecycle state.
+    select exactly one lifecycle state.  ``cursor`` is returned through
+    ``X-Next-Cursor`` and the list response stays backward compatible with
+    callers that do not paginate.
     """
     since, until = _alert_window(from_, to)
-    rows = await list_alerts(
+    rows, next_cursor = await _read_alert_page(
         session,
         limit=limit,
+        before=_decode_alert_before(cursor),
+        status_filter=status_filter,
+        rule=rule,
+        drone_id=drone_id,
+        since=since,
+        until=until,
+    )
+    if next_cursor is not None:
+        response.headers["X-Next-Cursor"] = next_cursor
+    return [alert_to_out(row) for row in rows]
+
+
+@router.get("/alerts/page", response_model=AlertPage)
+async def get_alerts_page(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    limit: Annotated[int, Query(ge=1, le=500)] = 50,
+    cursor: Annotated[
+        str | None,
+        Query(description="Opaque alert keyset cursor"),
+    ] = None,
+    status_filter: Annotated[
+        Literal["active", "open", "acknowledged", "resolved"] | None,
+        Query(alias="status", description="Lifecycle state filter"),
+    ] = None,
+    rule: Annotated[str | None, Query(min_length=1, max_length=32)] = None,
+    drone_id: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
+    from_: Annotated[
+        datetime | None,
+        Query(alias="from", description="Triggered-at window start"),
+    ] = None,
+    to: Annotated[datetime | None, Query()] = None,
+) -> AlertPage:
+    """Return an alert page with an explicit next cursor."""
+    since, until = _alert_window(from_, to)
+    rows, next_cursor = await _read_alert_page(
+        session,
+        limit=limit,
+        before=_decode_alert_before(cursor),
+        status_filter=status_filter,
+        rule=rule,
+        drone_id=drone_id,
+        since=since,
+        until=until,
+    )
+    return AlertPage(
+        items=[alert_to_out(row) for row in rows],
+        next_cursor=next_cursor,
+    )
+
+
+@router.get("/alerts/stats", response_model=AlertStatsOut)
+async def get_alert_stats_route(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    status_filter: Annotated[
+        Literal["active", "open", "acknowledged", "resolved"] | None,
+        Query(alias="status", description="Lifecycle state filter"),
+    ] = None,
+    rule: Annotated[str | None, Query(min_length=1, max_length=32)] = None,
+    drone_id: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
+    from_: Annotated[
+        datetime | None,
+        Query(alias="from", description="Triggered-at window start"),
+    ] = None,
+    to: Annotated[datetime | None, Query()] = None,
+) -> AlertStatsOut:
+    """Return lifecycle and grouping counts for the same alert filters."""
+    since, until = _alert_window(from_, to)
+    stats = await get_alert_stats(
+        session,
         status=status_filter,
         rule=rule,
         drone_id=drone_id,
         since=since,
         until=until,
     )
-    return [alert_to_out(row) for row in rows]
+    return AlertStatsOut(**stats)
 
 
 @router.get("/alerts/{alert_id}", response_model=AlertOut)

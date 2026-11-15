@@ -312,6 +312,8 @@ async def main() -> int:
         reopened = None
         final_resolution = None
         alert_events = None
+        alert_page = None
+        alert_stats = None
         if run_alerts:
             alert = run_alerts[0]
             ack_response = await client.post(
@@ -366,6 +368,18 @@ async def main() -> int:
             )
             events_response.raise_for_status()
             alert_events = events_response.json()
+            page_response = await client.get(
+                "/alerts/page",
+                params={"limit": 1, "drone_id": ghost.drone_id},
+            )
+            page_response.raise_for_status()
+            alert_page = page_response.json()
+            stats_response = await client.get(
+                "/alerts/stats",
+                params={"drone_id": ghost.drone_id},
+            )
+            stats_response.raise_for_status()
+            alert_stats = stats_response.json()
 
     webhook_deliveries: list[dict] = []
     if run_alerts:
@@ -423,6 +437,8 @@ async def main() -> int:
             or reopened is None
             or final_resolution is None
             or alert_events is None
+            or alert_page is None
+            or alert_stats is None
         ):
             print("FAIL: acknowledgement requests did not complete")
             ok = False
@@ -448,6 +464,22 @@ async def main() -> int:
                 ok = False
             if final_resolution.get("status") != "resolved":
                 print("FAIL: alert could not be resolved after reopen")
+                ok = False
+            if len(alert_page.get("items", [])) != 1:
+                print("FAIL: alert page did not return the run's alert")
+                ok = False
+            if alert_page.get("next_cursor") is not None:
+                print("FAIL: single-alert page unexpectedly has a cursor")
+                ok = False
+            if (
+                alert_stats.get("total") != 1
+                or alert_stats.get("resolved") != 1
+                or alert_stats.get("active") != 0
+            ):
+                print(
+                    "FAIL: alert statistics did not reflect final state: "
+                    f"{alert_stats}"
+                )
                 ok = False
             actions = [event.get("action") for event in alert_events]
             for action in ("acknowledged", "resolved", "reopened"):
@@ -498,7 +530,7 @@ async def main() -> int:
 
     print(
         "PASS: official radio bytes -> MQTT -> DB -> HTTP -> alert "
-        "lifecycle -> signed webhook verified"
+        "lifecycle -> pagination/stats -> signed webhook verified"
         if ok
         else "FAILED"
     )

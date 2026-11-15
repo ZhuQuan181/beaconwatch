@@ -9,6 +9,8 @@
 import type {
   Alert,
   AlertEvent,
+  AlertPage,
+  AlertStats,
   DroneObservation,
   DroneSummary,
   GeofenceZone,
@@ -20,6 +22,16 @@ const BASE = "/api";
 const DEFAULT_TIMEOUT_MS = 8_000;
 const DEFAULT_RETRIES = 2;
 const API_TOKEN = (import.meta.env.VITE_API_TOKEN ?? "").trim();
+
+export interface AlertQuery {
+  limit?: number;
+  status?: "active" | "open" | "acknowledged" | "resolved";
+  rule?: string;
+  droneId?: string;
+  from?: string;
+  to?: string;
+  cursor?: string;
+}
 
 class ApiError extends Error {
   constructor(
@@ -173,6 +185,18 @@ async function jsonPost<T>(
   return jsonRequest<T>(path, { ...options, method: "POST", body });
 }
 
+function alertQueryString(params: AlertQuery): string {
+  const q = new URLSearchParams();
+  if (params.limit !== undefined) q.set("limit", String(params.limit));
+  if (params.status) q.set("status", params.status);
+  if (params.rule) q.set("rule", params.rule);
+  if (params.droneId) q.set("drone_id", params.droneId);
+  if (params.from) q.set("from", params.from);
+  if (params.to) q.set("to", params.to);
+  if (params.cursor) q.set("cursor", params.cursor);
+  return q.toString();
+}
+
 export const api = {
   health: (signal?: AbortSignal) =>
     jsonGet<{ status: string }>("/health", { signal }),
@@ -250,6 +274,28 @@ export const api = {
 
   listAlerts: (limit = 50, signal?: AbortSignal) =>
     jsonGet<Alert[]>(`/alerts?limit=${limit}`, { signal }),
+
+  listAlertsPage: (
+    params: AlertQuery = {},
+    signal?: AbortSignal,
+  ) => {
+    const qs = alertQueryString(params);
+    return jsonGet<AlertPage>(
+      `/alerts/page${qs ? `?${qs}` : ""}`,
+      { signal },
+    );
+  },
+
+  getAlertStats: (
+    params: Omit<AlertQuery, "limit" | "cursor"> = {},
+    signal?: AbortSignal,
+  ) => {
+    const qs = alertQueryString(params);
+    return jsonGet<AlertStats>(
+      `/alerts/stats${qs ? `?${qs}` : ""}`,
+      { signal },
+    );
+  },
 
   acknowledgeAlert: (
     alertId: string,

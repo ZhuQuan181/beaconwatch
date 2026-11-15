@@ -45,6 +45,11 @@ PYTHONPATH=server/src .venv/bin/python -m pytest -q server/tests
 - 告警确认、解决、重开、未知告警 404 和状态变更 WebSocket 广播；
 - 已解决告警再次触发时自动重开、重开计数和系统审计事件；
 - 告警状态/规则/无人机/时间窗口筛选、事件时间线；
+- 告警专用游标翻页、相同触发时间的 `alert_id` 决胜、过滤条件组合、
+  跨类型游标拒绝和向后兼容的 `X-Next-Cursor`；
+- 告警状态/严重度/规则统计、最早未关闭时间及 `/alerts/stats` 路由优先级；
+- 保留任务只删除过期已解决且没有活跃通知的告警、只删除终态通知、
+  批次计数和 worker 指标；
 - 告警落库失败时仍下发实时告警；
 - 通知 outbox 与告警状态原子写入、幂等生命周期事件、通知写入失败隔离；
 - Webhook HMAC 签名、2xx/4xx/5xx/超时、退避重试、最大尝试和死信；
@@ -75,7 +80,7 @@ make e2e
 和再次解决，并验证完整审计事件序列可从真实 PostgreSQL 读回。它还会启动
 一个本地签名 Webhook 接收端，验证 `alert.triggered`、`acknowledged`、
 `resolved`、`reopened`、最终 `resolved` 的 HMAC、事件顺序和唯一
-`delivery_id`。
+`delivery_id`，并检查告警分页响应和最终状态统计。
 
 ### 前端
 
@@ -88,21 +93,22 @@ npm run build
 ```
 
 构建把 MapLibre 拆成独立 vendor chunk。生产依赖审计必须为 0 个 high/critical。
-静态 mock 构建还必须覆盖告警确认接口，避免 Pages 演示出现只读回归。
+静态 mock 构建还必须覆盖告警确认、分页和统计接口，避免 Pages 演示出现
+只读或缺失历史行为的回归。
 
 ### Docker 冷启动
 
 CI 会构建服务端镜像并校验 Compose 配置。发布前人工验证应使用独立 Compose
 project、独立端口和独立数据卷，不要对现有生产卷执行 `down -v`。预期结果：
 
-1. 空库启动时自动执行全部 Alembic 迁移（当前到 `0007`）；
+1. 空库启动时自动执行全部 Alembic 迁移（当前到 `0008`）；
 2. `/health/ready` 返回 200；
 3. `/metrics` 显示 MQTT 已连接；
 4. 测试容器和测试卷可以独立删除。
 
 升级发布还需验证上一版的 schema 升级：已有告警、审计事件和确认状态必须
-保留，`notification_outbox` 应新增且为待投递状态；旧进程重启后应继续处理
-到期通知。
+保留，`notification_outbox` 应新增且为待投递状态，新的告警游标/清理索引
+必须存在；旧进程重启后应继续处理到期通知。
 
 ## 3. 官方 golden vectors
 

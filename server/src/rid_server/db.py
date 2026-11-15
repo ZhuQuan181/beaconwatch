@@ -161,11 +161,14 @@ class AlertRecord(Base):
             "status IN ('open', 'acknowledged', 'resolved')",
             name="ck_alerts_status",
         ),
-        Index("ix_alerts_triggered_at", "triggered_at"),
+        Index("ix_alerts_triggered_alert", "triggered_at", "alert_id"),
         Index("ix_alerts_drone_id", "drone_id"),
         Index("ix_alerts_acknowledged_at", "acknowledged_at"),
         Index("ix_alerts_status_triggered", "status", "triggered_at"),
+        Index("ix_alerts_status_resolved", "status", "resolved_at"),
         Index("ix_alerts_drone_triggered", "drone_id", "triggered_at"),
+        Index("ix_alerts_rule_triggered", "rule", "triggered_at"),
+        Index("ix_alerts_severity_triggered", "severity", "triggered_at"),
     )
 
 
@@ -277,6 +280,16 @@ class NotificationOutbox(Base):
             "created_at",
         ),
         Index("ix_notification_outbox_created_at", "created_at"),
+        Index(
+            "ix_notification_outbox_status_updated",
+            "status",
+            "updated_at",
+        ),
+        Index(
+            "ix_notification_outbox_alert_status",
+            "alert_id",
+            "status",
+        ),
     )
 
 

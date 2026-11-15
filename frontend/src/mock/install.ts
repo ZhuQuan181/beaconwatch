@@ -5,7 +5,7 @@
  * `WebSocket` for a timer-driven fake that emits the same frames the
  * real server would.  The app code is untouched.
  */
-import type { WsFrame } from "../types";
+import type { Alert, AlertStats, WsFrame } from "../types";
 import {
   alertEvents,
   alerts,
@@ -49,6 +49,70 @@ function filterObservations(url: URL): Response {
   const requested = Number(url.searchParams.get("limit") ?? "1000");
   const limit = Number.isFinite(requested) ? requested : 1000;
   return jsonResponse(rows.slice(0, limit));
+}
+
+function filterAlerts(url: URL): Alert[] {
+  let rows = [...alerts].sort(
+    (a, b) => Date.parse(b.at) - Date.parse(a.at),
+  );
+  const status = url.searchParams.get("status");
+  if (status === "active") {
+    rows = rows.filter((row) => row.status !== "resolved");
+  } else if (status) {
+    rows = rows.filter((row) => row.status === status);
+  }
+  const rule = url.searchParams.get("rule");
+  if (rule) rows = rows.filter((row) => row.rule === rule);
+  const droneId = url.searchParams.get("drone_id");
+  if (droneId) rows = rows.filter((row) => row.drone_id === droneId);
+  const from = url.searchParams.get("from");
+  if (from) {
+    const start = Date.parse(from);
+    rows = rows.filter((row) => Date.parse(row.at) >= start);
+  }
+  const to = url.searchParams.get("to");
+  if (to) {
+    const end = Date.parse(to);
+    rows = rows.filter((row) => Date.parse(row.at) <= end);
+  }
+  return rows;
+}
+
+function alertStats(rows: Alert[]): AlertStats {
+  const open = rows.filter((row) => row.status === "open").length;
+  const acknowledged = rows.filter(
+    (row) => row.status === "acknowledged",
+  ).length;
+  const resolved = rows.filter((row) => row.status === "resolved").length;
+  const bySeverity: Record<string, number> = {};
+  const byRule: Record<string, number> = {};
+  for (const row of rows) {
+    bySeverity[row.severity] = (bySeverity[row.severity] ?? 0) + 1;
+    byRule[row.rule] = (byRule[row.rule] ?? 0) + 1;
+  }
+  const activeRows = rows.filter((row) => row.status !== "resolved");
+  const oldestActive = activeRows.reduce<string | null>((oldest, row) => {
+    if (!oldest) return row.at;
+    return Date.parse(row.at) < Date.parse(oldest) ? row.at : oldest;
+  }, null);
+  return {
+    total: rows.length,
+    open,
+    acknowledged,
+    resolved,
+    active: open + acknowledged,
+    by_severity: bySeverity,
+    by_rule: byRule,
+    oldest_active_at: oldestActive,
+  };
+}
+
+function parseMockAlertCursor(value: string | null): number | null {
+  if (!value) return 0;
+  const match = /^mock-alert-(\d+)$/.exec(value);
+  if (!match) return null;
+  const offset = Number(match[1]);
+  return Number.isSafeInteger(offset) && offset >= 0 ? offset : null;
 }
 
 function handleApi(url: URL, init: RequestInit): Response {
@@ -193,21 +257,30 @@ function handleApi(url: URL, init: RequestInit): Response {
       return filterObservations(url);
     case "/api/zones":
       return jsonResponse(zones);
+    case "/api/alerts/page": {
+      const rows = filterAlerts(url);
+      const requested = Number(url.searchParams.get("limit") ?? "50");
+      const limit = Number.isFinite(requested) ? requested : 50;
+      const offset = parseMockAlertCursor(url.searchParams.get("cursor"));
+      if (offset === null) {
+        return jsonResponse({ detail: "invalid alert cursor" }, 400);
+      }
+      const items = rows.slice(offset, offset + limit);
+      const nextOffset = offset + items.length;
+      return jsonResponse({
+        items,
+        next_cursor:
+          nextOffset < rows.length
+            ? `mock-alert-${nextOffset}`
+            : null,
+      });
+    }
+    case "/api/alerts/stats":
+      return jsonResponse(alertStats(filterAlerts(url)));
     case "/api/alerts": {
       const requested = Number(url.searchParams.get("limit") ?? "50");
       const limit = Number.isFinite(requested) ? requested : 50;
-      const status = url.searchParams.get("status");
-      let rows = alerts;
-      if (status === "active") {
-        rows = rows.filter((row) => row.status !== "resolved");
-      } else if (status) {
-        rows = rows.filter((row) => row.status === status);
-      }
-      const rule = url.searchParams.get("rule");
-      if (rule) rows = rows.filter((row) => row.rule === rule);
-      const droneId = url.searchParams.get("drone_id");
-      if (droneId) rows = rows.filter((row) => row.drone_id === droneId);
-      return jsonResponse(rows.slice(0, limit));
+      return jsonResponse(filterAlerts(url).slice(0, limit));
     }
     default:
       return jsonResponse({ detail: "mock endpoint not found" }, 404);

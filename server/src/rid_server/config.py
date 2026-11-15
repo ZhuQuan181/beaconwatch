@@ -71,6 +71,12 @@ class Settings(BaseSettings):
     # hovering in a no-fly zone emits 4 fixes/second; without this the
     # panel is unusable within a minute.
     alert_dedup_seconds: float = 120.0
+    # Zero disables destructive cleanup.  Operators must opt in to a
+    # retention policy because alert events are an audit trail.
+    alert_retention_days: int = Field(default=0, ge=0, le=3650)
+    notification_retention_days: int = Field(default=0, ge=0, le=3650)
+    retention_interval_s: float = Field(default=3600.0, ge=60.0, le=86400.0)
+    retention_batch_size: int = Field(default=500, ge=1, le=5000)
 
     # ── Alert notification webhook ──────────────────────────────────
     # Empty URL disables notification enqueueing and the worker.  When a

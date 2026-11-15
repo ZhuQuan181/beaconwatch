@@ -85,11 +85,19 @@ curl -s -X POST \
 
 curl -s -H "Authorization: Bearer $RID_API_TOKEN" \
   "http://localhost:8000/alerts/$ALERT_ID/events"
+
+curl -s -H "Authorization: Bearer $RID_API_TOKEN" \
+  "http://localhost:8000/alerts/page?limit=50"
+curl -s -H "Authorization: Bearer $RID_API_TOKEN" \
+  "http://localhost:8000/alerts/stats"
 ```
 
 `status=active` 可以只查询未关闭告警，也支持按 `rule`、`drone_id`、`from`
 和 `to` 过滤。首次确认和解决均写入操作员、时间与备注；重复确认或解决返回
 同一记录。只有已解决告警可以重新打开，每次状态变化都会进入审计时间线。
+`GET /alerts` 在有更早记录时返回 `X-Next-Cursor`；`/alerts/page` 返回
+`{items, next_cursor}`，两类游标不能与观测游标混用。`/alerts/stats` 支持
+同一组过滤参数，并返回状态、严重度、规则和最早未关闭时间统计。
 
 ### 可选告警 Webhook
 
@@ -113,6 +121,23 @@ export RID_NOTIFY_MAX_BACKOFF_S=300
 `alert.reopened`。告警状态变更与 outbox 行在同一事务内提交；通知失败不会
 阻断观测入库或告警 UI。投递为至少一次，重试不会改变 `delivery_id`，接收端
 必须用它做幂等去重。
+
+### 告警与通知保留
+
+保留清理默认关闭，升级不会自动删除审计记录。需要限制历史规模时显式设置：
+
+```bash
+export RID_ALERT_RETENTION_DAYS=90
+export RID_NOTIFICATION_RETENTION_DAYS=30
+export RID_RETENTION_INTERVAL_S=3600
+export RID_RETENTION_BATCH_SIZE=500
+```
+
+- 只删除已解决且超过期限的告警；
+- 仍有 pending/delivering Webhook 的告警会被保留；
+- 通知只删除 delivered/dead 行，投递中的记录不会被清理；
+- 每批独立提交，清理失败会写入日志和
+  `rid_retention_failures_total`，不会阻断 API 或 MQTT 入库。
 
 接收端验证示例：
 
@@ -211,6 +236,11 @@ curl -s http://localhost:8000/metrics
 - 每个 HTTP 响应带 `X-Request-ID`，并记录请求数、耗时、状态码和鉴权失败数；
 - `/observations` 达到一页上限时返回 `X-Next-Cursor`，也可使用
   `/observations/page` 获取 `{items, next_cursor}`；不要再用深 offset 翻页。
+- `/alerts` 达到一页上限时返回 `X-Next-Cursor`，也可使用
+  `/alerts/page`；`/alerts/stats` 提供服务端聚合计数；
+- `rid_retention_alerts_deleted_total`、
+  `rid_retention_notifications_deleted_total`、
+  `rid_retention_failures_total` 和最近成功时间用于监控清理任务。
 
 ## 5. 端到端验证
 
@@ -221,14 +251,14 @@ make e2e
 脚本读取官方 OpenDroneID encoder 生成的 Beacon/Message Pack，经过真实
 receiver、pipeline、EMQX、数据库和 FastAPI，最后通过 HTTP 检查协议、RSSI、
 速度、操作员位置、告警生命周期，并用本地签名接收端验证触发、确认、解决和
-重开通知的 HMAC 与投递顺序。
+重开通知的 HMAC 与投递顺序；同时验证告警分页形状和最终状态统计。
 
 ## 6. 数据库升级与备份
 
 升级镜像：
 
 ```bash
-docker build -t beaconwatch-server:0.6.0 ./server
+docker build -t beaconwatch-server:0.7.0 ./server
 docker compose -f server/docker-compose.yml up -d --build rid-server
 ```
 

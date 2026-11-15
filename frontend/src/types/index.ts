@@ -96,6 +96,22 @@ export interface Alert {
   reopen_count?: number;
 }
 
+export interface AlertPage {
+  items: Alert[];
+  next_cursor: string | null;
+}
+
+export interface AlertStats {
+  total: number;
+  open: number;
+  acknowledged: number;
+  resolved: number;
+  active: number;
+  by_severity: Record<string, number>;
+  by_rule: Record<string, number>;
+  oldest_active_at?: string | null;
+}
+
 export interface AlertEvent {
   event_id: string;
   alert_id: string;

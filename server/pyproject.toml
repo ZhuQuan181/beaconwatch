@@ -1,6 +1,6 @@
 [project]
 name = "rid-server"
-version = "0.6.0"
+version = "0.7.0"
 description = "RID detection system — server (FastAPI + PostGIS/TimescaleDB + MQTT subscriber)"
 requires-python = ">=3.11"
 dependencies = [

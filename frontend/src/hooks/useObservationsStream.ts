@@ -11,20 +11,32 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   Alert,
   AlertEvent,
+  AlertStats,
   DroneObservation,
   WsFrame,
 } from "../types";
 import { api, getApiToken } from "../api/client";
 
 const MAX_RETAIN = 200;
-const MAX_ALERTS = 200;
+const MAX_ALERTS = 500;
+const ALERT_PAGE_SIZE = 200;
+const OLDER_ALERT_PAGE_SIZE = 100;
 const WS_STALE_MS = 45_000;
+const STATS_REFRESH_DELAY_MS = 750;
 
 export interface StreamState {
   /** Most-recent observations, newest first. */
   recent: DroneObservation[];
   /** Most-recent alerts, newest first. */
   alerts: Alert[];
+  /** Cursor for the next older alert page, if any. */
+  alertNextCursor: string | null;
+  /** True while an alert page is being loaded. */
+  alertsLoading: boolean;
+  /** Alert history loading error, separate from the WebSocket error. */
+  alertsError: string | null;
+  /** Server-side aggregate counts. */
+  alertStats: AlertStats | null;
   /** Cumulative count since the page was opened. */
   total: number;
   /** True when the WebSocket is open. */
@@ -56,6 +68,10 @@ export interface ObservationStream extends StreamState {
   ) => Promise<Alert>;
   /** Load the immutable lifecycle audit trail for one alert. */
   loadAlertHistory: (alertId: string) => Promise<AlertEvent[]>;
+  /** Append one older page of durable alerts. */
+  loadOlderAlerts: () => Promise<number>;
+  /** Refresh aggregate counts from the server. */
+  refreshAlertStats: () => Promise<void>;
 }
 
 function mergeObservationRows(
@@ -111,6 +127,24 @@ function mergeAlert(current: Alert | undefined, incoming: Alert): Alert {
   return merged;
 }
 
+function mergeAlertRows(
+  current: Alert[],
+  incoming: Alert[],
+): Alert[] {
+  const byId = new Map(
+    current.map((alert) => [alert.alert_id, alert]),
+  );
+  for (const alert of incoming) {
+    byId.set(
+      alert.alert_id,
+      mergeAlert(byId.get(alert.alert_id), alert),
+    );
+  }
+  return [...byId.values()]
+    .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
+    .slice(0, MAX_ALERTS);
+}
+
 function replaceAlert(current: StreamState, updated: Alert): StreamState {
   const exists = current.alerts.some(
     (alert) => alert.alert_id === updated.alert_id,
@@ -131,6 +165,10 @@ export function useObservationsStream(
   const [state, setState] = useState<StreamState>({
     recent: [],
     alerts: [],
+    alertNextCursor: null,
+    alertsLoading: true,
+    alertsError: null,
+    alertStats: null,
     total: 0,
     connected: false,
     error: null,
@@ -141,11 +179,65 @@ export function useObservationsStream(
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const watchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const stoppedRef = useRef(false);
+  const alertCursorRef = useRef<string | null>(null);
+  const loadingOlderRef = useRef(false);
+  const statsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const clearWatchdog = useCallback(() => {
     if (watchdogRef.current) {
       clearTimeout(watchdogRef.current);
       watchdogRef.current = null;
+    }
+  }, []);
+
+  const refreshAlertStats = useCallback(async () => {
+    try {
+      const alertStats = await api.getAlertStats();
+      setState((current) => ({ ...current, alertStats }));
+    } catch {
+      /* aggregate counts are supplementary; keep the last snapshot */
+    }
+  }, []);
+
+  const scheduleStatsRefresh = useCallback(() => {
+    if (statsTimerRef.current) clearTimeout(statsTimerRef.current);
+    statsTimerRef.current = setTimeout(() => {
+      statsTimerRef.current = null;
+      void refreshAlertStats();
+    }, STATS_REFRESH_DELAY_MS);
+  }, [refreshAlertStats]);
+
+  const loadOlderAlerts = useCallback(async () => {
+    const cursor = alertCursorRef.current;
+    if (!cursor || loadingOlderRef.current) return 0;
+    loadingOlderRef.current = true;
+    setState((current) => ({
+      ...current,
+      alertsLoading: true,
+      alertsError: null,
+    }));
+    try {
+      const page = await api.listAlertsPage({
+        limit: OLDER_ALERT_PAGE_SIZE,
+        cursor,
+      });
+      alertCursorRef.current = page.next_cursor;
+      setState((current) => ({
+        ...current,
+        alerts: mergeAlertRows(current.alerts, page.items),
+        alertNextCursor: page.next_cursor,
+        alertsLoading: false,
+      }));
+      return page.items.length;
+    } catch (error) {
+      setState((current) => ({
+        ...current,
+        alertsLoading: false,
+        alertsError: `更早告警加载失败：${(error as Error).message}`,
+      }));
+      return 0;
+    } finally {
+      loadingOlderRef.current = false;
     }
   }, []);
 
@@ -158,9 +250,10 @@ export function useObservationsStream(
       setState((current) => {
         return replaceAlert(current, updated);
       });
+      void refreshAlertStats();
       return updated;
     },
-    [],
+    [refreshAlertStats],
   );
 
   const resolveAlert = useCallback(
@@ -170,9 +263,10 @@ export function useObservationsStream(
         note,
       });
       setState((current) => replaceAlert(current, updated));
+      void refreshAlertStats();
       return updated;
     },
-    [],
+    [refreshAlertStats],
   );
 
   const reopenAlert = useCallback(
@@ -182,9 +276,10 @@ export function useObservationsStream(
         note,
       });
       setState((current) => replaceAlert(current, updated));
+      void refreshAlertStats();
       return updated;
     },
-    [],
+    [refreshAlertStats],
   );
 
   const loadAlertHistory = useCallback(
@@ -198,27 +293,34 @@ export function useObservationsStream(
   useEffect(() => {
     const controller = new AbortController();
     api
-      .listAlerts(200, controller.signal)
-      .then((rows) => {
-        if (!rows.length || controller.signal.aborted) return;
+      .listAlertsPage(
+        { limit: ALERT_PAGE_SIZE },
+        controller.signal,
+      )
+      .then((page) => {
+        if (controller.signal.aborted) return;
+        alertCursorRef.current = page.next_cursor;
         setState((s) => {
-          const byId = new Map(
-            s.alerts.map((alert) => [alert.alert_id, alert]),
-          );
-          for (const row of rows) {
-            byId.set(row.alert_id, mergeAlert(byId.get(row.alert_id), row));
-          }
-          const merged = [...byId.values()]
-            .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
-            .slice(0, MAX_ALERTS);
-          return { ...s, alerts: merged };
+          return {
+            ...s,
+            alerts: mergeAlertRows(s.alerts, page.items),
+            alertNextCursor: page.next_cursor,
+            alertsLoading: false,
+            alertsError: null,
+          };
         });
       })
-      .catch(() => {
-        /* panel stays empty; live alerts still work */
+      .catch((error) => {
+        if (controller.signal.aborted) return;
+        setState((s) => ({
+          ...s,
+          alertsLoading: false,
+          alertsError: `告警历史加载失败：${(error as Error).message}`,
+        }));
       });
+    void refreshAlertStats();
     return () => controller.abort();
-  }, []);
+  }, [refreshAlertStats]);
 
   const connect = useCallback(() => {
     if (stoppedRef.current) return;
@@ -303,6 +405,7 @@ export function useObservationsStream(
               lastMessageAt: Date.now(),
             };
           });
+          scheduleStatsRefresh();
         }
       } catch (error) {
         setState((s) => ({
@@ -330,7 +433,7 @@ export function useObservationsStream(
       backoffRef.current = Math.min(backoffRef.current * 2, 10_000);
       timerRef.current = setTimeout(connect, delay);
     };
-  }, [clearWatchdog, wsUrl]);
+  }, [clearWatchdog, scheduleStatsRefresh, wsUrl]);
 
   useEffect(() => {
     stoppedRef.current = false;
@@ -362,6 +465,10 @@ export function useObservationsStream(
         clearTimeout(timerRef.current);
         timerRef.current = null;
       }
+      if (statsTimerRef.current) {
+        clearTimeout(statsTimerRef.current);
+        statsTimerRef.current = null;
+      }
       clearWatchdog();
       const ws = wsRef.current;
       wsRef.current = null;
@@ -375,5 +482,7 @@ export function useObservationsStream(
     resolveAlert,
     reopenAlert,
     loadAlertHistory,
+    loadOlderAlerts,
+    refreshAlertStats,
   };
 }

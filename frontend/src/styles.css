@@ -394,6 +394,20 @@ header.topbar .stat--replay {
   color: #9aa3b2;
   font-variant-numeric: tabular-nums;
 }
+.alert-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 9px;
+  margin: -2px 0 7px;
+  color: #6f7a8c;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.alert-stats span + span::before {
+  content: "·";
+  margin-right: 9px;
+  color: #3b465b;
+}
 .alert-empty {
   margin: 0;
   font-size: 12px;
@@ -637,6 +651,26 @@ header.topbar .stat--replay {
   color: #738094;
   font-size: 10px;
   line-height: 1.5;
+}
+.alert-load-more {
+  width: 100%;
+  margin-top: 8px;
+  padding: 5px 8px;
+  border: 1px solid #2a3142;
+  border-radius: 3px;
+  background: #11151e;
+  color: #8a94a6;
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+.alert-load-more:hover:not(:disabled) {
+  border-color: #3b465b;
+  color: #b7c0cf;
+}
+.alert-load-more:disabled {
+  cursor: wait;
+  color: #58627a;
 }
 .alert-history ol {
   list-style: none;

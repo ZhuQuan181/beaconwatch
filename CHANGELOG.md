@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.7.0 - 2026-11-16
+
+### Added
+
+- Stable alert keyset pagination on `(triggered_at, alert_id)`, exposed
+  through `X-Next-Cursor` on `GET /alerts` and an explicit
+  `GET /alerts/page` response.
+- `GET /alerts/stats` with lifecycle, severity, rule and oldest-active
+  aggregates under the existing filter set.
+- Opt-in, batched retention policies for resolved alerts and terminal
+  notification outbox rows. Unresolved alerts and alerts with pending or
+  in-flight webhook deliveries are never purged.
+- Retention worker metrics for deleted rows, failures, last success and
+  worker state.
+- Dashboard alert statistics, cursor-based "load older" history and matching
+  static-demo endpoints.
+- Alert query, hydration and retention tests, plus real E2E checks for the
+  page and statistics contracts.
+
+### Changed
+
+- Alert ledger indexes now cover the keyset order, rule/severity windows,
+  resolved cleanup and outbox terminal-state cleanup.
+- Retention defaults to disabled so an upgrade cannot silently delete audit
+  records; operators must set explicit day counts.
+- Repository/package metadata advanced to 0.7.0.
+
 ## 0.6.0 - 2026-11-16
 
 ### Added

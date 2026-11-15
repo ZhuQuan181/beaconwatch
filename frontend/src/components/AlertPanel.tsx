@@ -1,5 +1,10 @@
 import { useState } from "react";
-import type { Alert, AlertEvent, AlertStatus } from "../types";
+import type {
+  Alert,
+  AlertEvent,
+  AlertStatus,
+  AlertStats,
+} from "../types";
 
 /**
  * AlertPanel — the operator's action list.
@@ -73,6 +78,11 @@ export function AlertPanel({
   onResolve,
   onReopen,
   onLoadHistory,
+  alertStats,
+  hasMoreAlerts = false,
+  alertsLoading = false,
+  alertsError,
+  onLoadOlder,
 }: {
   alerts: Alert[];
   onSelectDrone?: (droneId: string) => void;
@@ -92,6 +102,11 @@ export function AlertPanel({
     note?: string,
   ) => Promise<Alert>;
   onLoadHistory?: (alertId: string) => Promise<AlertEvent[]>;
+  alertStats?: AlertStats | null;
+  hasMoreAlerts?: boolean;
+  alertsLoading?: boolean;
+  alertsError?: string | null;
+  onLoadOlder?: () => Promise<number>;
 }) {
   const [operator, setOperator] = useState(() => {
     try {
@@ -269,13 +284,24 @@ export function AlertPanel({
       <div className="alert-head">
         <h2>告警</h2>
         <span className="alert-count">
-          {alerts.length === 0
+          {alertStats
+            ? `${alertStats.open} 待处置 · ${alertStats.active} 未关闭 / ${alertStats.total} 总计`
+            : alerts.length === 0
             ? "无"
             : criticalCount > 0
               ? `${criticalCount} 严重 · ${openAlerts.length} 待处置 / ${alerts.length}`
               : `${openAlerts.length} 待处置 / ${alerts.length}`}
         </span>
       </div>
+
+      {alertStats && (
+        <div className="alert-stats" aria-label="告警统计">
+          <span>严重 {alertStats.by_severity.critical ?? 0}</span>
+          <span>已确认 {alertStats.acknowledged}</span>
+          <span>已解决 {alertStats.resolved}</span>
+          <span>未关闭 {alertStats.active}</span>
+        </div>
+      )}
 
       <div className="alert-filters" role="group" aria-label="告警状态筛选">
         {(
@@ -332,14 +358,23 @@ export function AlertPanel({
           {actionError}
         </p>
       )}
+      {alertsError && (
+        <p className="alert-error" role="alert">
+          {alertsError}
+        </p>
+      )}
 
       {visible.length === 0 ? (
         <p className="alert-empty">
-          {filter === "active" ? "当前没有未关闭告警。" : "没有匹配的告警。"}
+          {alertsLoading
+            ? "正在加载告警…"
+            : filter === "active"
+              ? "当前没有未关闭告警。"
+              : "没有匹配的告警。"}
         </p>
       ) : (
         <ul className="alert-list">
-          {visible.slice(0, 30).map((alert) => {
+          {visible.slice(0, 100).map((alert) => {
             const status = statusOf(alert);
             const history = historyById[alert.alert_id];
             return (
@@ -433,6 +468,16 @@ export function AlertPanel({
             );
           })}
         </ul>
+      )}
+      {onLoadOlder && hasMoreAlerts && (
+        <button
+          type="button"
+          className="alert-load-more"
+          disabled={alertsLoading}
+          onClick={() => void onLoadOlder()}
+        >
+          {alertsLoading ? "正在加载更早告警…" : "加载更早告警"}
+        </button>
       )}
     </div>
   );

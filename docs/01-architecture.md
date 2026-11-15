@@ -171,8 +171,23 @@ BeaconWatch 接收无人机广播的 Remote ID（ASTM F3411 / Open Drone ID）�
 - 每次触发、确认、解决和重开都会写入不可变的 `alert_events` 审计表；
 - `GET /alerts/{alert_id}/events` 返回完整生命周期时间线；
 - 状态变更通过 WebSocket 广播，其他在线操作员无需刷新即可看到；
+- `GET /alerts` 在还有更早记录时返回 `X-Next-Cursor`，
+  `GET /alerts/page` 返回显式的 `{items, next_cursor}`；游标基于
+  `(triggered_at, alert_id)`，不会随历史增长退化为深 offset 扫描；
+- `GET /alerts/stats` 按同一组状态/规则/无人机/时间过滤条件返回总数、
+  open/acknowledged/resolved/active、严重度与规则分布以及最早未关闭时间；
 - 告警落库失败会记录日志并降级为仅实时推送，不阻断观测入库；
 - 进程内 ring 只作为最近告警的轻量缓存，不再是数据源。
+
+### 告警保留
+
+- 告警保留和通知 outbox 保留默认关闭，避免升级时静默删除审计数据；
+- 设置 `RID_ALERT_RETENTION_DAYS` 后，只清理已解决超过期限、且没有
+  pending/delivering Webhook 投递的告警；
+- 设置 `RID_NOTIFICATION_RETENTION_DAYS` 后，只清理 delivered/dead 状态的
+  通知行，pending/delivering 永不按期限删除；
+- 清理按 `RID_RETENTION_BATCH_SIZE` 分批提交，失败只记录指标和日志，
+  不影响 API、MQTT 入库或通知 worker。
 
 ### 告警通知
 
@@ -206,6 +221,8 @@ BeaconWatch 接收无人机广播的 Remote ID（ASTM F3411 / Open Drone ID）�
 - `GET /observations/page`
 - `GET /zones`, `PUT /zones/{zone_id}`
 - `GET /alerts`
+- `GET /alerts/page`
+- `GET /alerts/stats`
 - `GET /alerts/{alert_id}`
 - `GET /alerts/{alert_id}/events`
 - `POST /alerts/{alert_id}/ack`
@@ -218,6 +235,11 @@ BeaconWatch 接收无人机广播的 Remote ID（ASTM F3411 / Open Drone ID）�
 `GET /observations` 在还有下一页时返回 `X-Next-Cursor`，也接受
 `cursor=`；`/observations/page` 返回 `{items, next_cursor}`。游标基于
 `(received_at, observation_id)`，避免深 offset 扫描和翻页期间的新数据漂移。
+
+告警使用独立的带类型游标：`GET /alerts` 保持原有数组响应并在还有更早
+记录时返回 `X-Next-Cursor`；`GET /alerts/page` 返回
+`{items, next_cursor}`。把观测游标传给告警接口会得到 400，避免两类游标
+被误用。
 
 WebSocket 推送以下 frame：
 
@@ -238,6 +260,7 @@ WebSocket 推送以下 frame：
 - WebSocket 45 秒收不到任何 frame 时主动关闭并重连；
 - 历史时间轴使用 REST 查询，不把完整数据库复制进浏览器；
 - 历史/未识别列表按固定 4 秒节流刷新，避免每条 WS 消息触发一次大查询；
+- 告警面板读取服务端聚合统计，并在需要时通过游标加载更早的持久化告警；
 - 地图弹窗使用 DOM `textContent`/`setDOMContent`，不把无人机字段拼进 HTML；
 - MapLibre 独立分包，主 bundle 不包含地图引擎。
 
@@ -249,10 +272,12 @@ WebSocket 推送以下 frame：
   查询都有对应索引；
 - geofence polygon 以 JSON/JSONB 保存，API、规则引擎和地图读取同一份几何；
 - `alerts` 表保存当前状态、触发次数、首次/最近触发时间、确认与解决字段，
-  并按状态/触发时间、无人机/触发时间和确认时间建立索引；
+  并按 `(triggered_at, alert_id)`、状态/触发时间、状态/解决时间、无人机/
+  触发时间、规则/触发时间和严重度/触发时间建立索引；
 - `alert_events` 表以追加方式保存触发、确认、解决和重开事件，不覆盖历史；
 - `notification_outbox` 保存待投递 payload、尝试/失败次数、下次尝试时间、
-  租约、死信原因和投递时间；状态与下次尝试时间建组合索引；
+  租约、死信原因和投递时间；状态与下次尝试时间、状态与更新时间、
+  告警与状态均有组合索引；
 - Alembic 在容器启动时自动执行 `upgrade head`。
 
 ## 9. 运维接口
@@ -261,7 +286,7 @@ WebSocket 推送以下 frame：
 - `/health/ready`：执行 `SELECT 1`，数据库不可用返回 503；
 - `/metrics`：MQTT 连接、接收/入库/重复/非法消息、重连、站点心跳、WS
   客户端/丢弃帧、HTTP 请求/耗时/状态码/鉴权失败、通知 outbox 各状态/
-  尝试/失败计数和 worker 状态。
+  尝试/失败计数、worker 状态，以及保留任务删除数/失败数/最近成功时间。
 
 ## 10. 安全现状与生产限制
 
@@ -274,7 +299,7 @@ TLS；Compose 默认仍是开发凭据和明文 MQTT。在公网或不可信网�
 3. MQTT ACL、每站客户端证书/账号和 Broker 侧 TLS 配置；
 4. 密钥管理、数据库最小权限、非默认密码；
 5. 多副本时用 Redis/NATS 等共享总线替代进程内 `ObservationBus`；
-6. 告警游标分页、统计接口、保留期限与清理任务。
+6. 告警通知的多渠道分发、值班升级策略和跨区域审计归档。
 
 这些是部署前置条件，不是仓库当前已经实现的功能。
 
@@ -293,6 +318,5 @@ docs/       架构、部署、测试文档
 
 1. RBAC/审计、MQTT ACL、密钥轮换与生产 TLS 渗透测试；
 2. 多站定位/时差融合与轨迹质量评分；
-3. 告警分页/统计、保留期限与清理任务；
-4. 多副本共享 WebSocket 总线；
-5. 真实无人机/抓包回放集与现场验收基线。
+3. 多副本共享 WebSocket 总线；
+4. 真实无人机/抓包回放集与现场验收基线。

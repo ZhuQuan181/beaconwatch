@@ -22,6 +22,7 @@ from .repository import (
     list_alerts,
     notification_outbox_counts,
 )
+from .retention import RetentionWorker
 from .routes import router, ws_router
 from .security import RequestContextMiddleware, require_api_token
 from .settings_state import set_subscriber_bus_hook
@@ -50,6 +51,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.notifier = notifier
     if notifier is not None:
         await notifier.start()
+    retention = (
+        RetentionWorker(settings)
+        if (
+            settings.alert_retention_days > 0
+            or settings.notification_retention_days > 0
+        )
+        else None
+    )
+    app.state.retention = retention
+    if retention is not None:
+        await retention.start()
     # Rules run after each committed observation.  Constructing the
     # engine here (not per message) keeps dedup state across messages —
     # a hovering drone would otherwise re-alert at 4 Hz.
@@ -93,6 +105,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await subscriber.stop()
         if notifier is not None:
             await notifier.stop()
+        if retention is not None:
+            await retention.stop()
         await dispose_engine()
         log.info("shutdown.done")
 
@@ -102,7 +116,7 @@ def create_app() -> FastAPI:
     request_metrics = RequestMetrics()
     app = FastAPI(
         title="RID Server",
-        version="0.6.0",
+        version="0.7.0",
         lifespan=lifespan,
     )
     app.state.settings = settings
@@ -152,6 +166,7 @@ def create_app() -> FastAPI:
         subscriber = getattr(request.app.state, "subscriber", None)
         bus = getattr(request.app.state, "bus", None)
         notifier = getattr(request.app.state, "notifier", None)
+        retention = getattr(request.app.state, "retention", None)
         values = {
             "rid_mqtt_connected": int(bool(getattr(subscriber, "connected", False))),
             "rid_mqtt_received_total": int(getattr(subscriber, "received", 0)),
@@ -174,6 +189,23 @@ def create_app() -> FastAPI:
                 notifier.last_success_at.timestamp()
                 if getattr(notifier, "last_success_at", None) is not None
                 else 0.0
+            ),
+            "rid_retention_worker_running": int(
+                bool(getattr(retention, "running", False))
+            ),
+            "rid_retention_last_success_timestamp_seconds": (
+                retention.last_success_at.timestamp()
+                if getattr(retention, "last_success_at", None) is not None
+                else 0.0
+            ),
+            "rid_retention_alerts_deleted_total": int(
+                getattr(retention, "alerts_deleted", 0)
+            ),
+            "rid_retention_notifications_deleted_total": int(
+                getattr(retention, "notifications_deleted", 0)
+            ),
+            "rid_retention_failures_total": int(
+                getattr(retention, "failures", 0)
             ),
         }
         try:

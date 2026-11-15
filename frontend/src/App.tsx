@@ -26,6 +26,11 @@ export function App() {
     resolveAlert,
     reopenAlert,
     loadAlertHistory,
+    alertNextCursor,
+    alertsLoading,
+    alertsError,
+    alertStats,
+    loadOlderAlerts,
   } = useObservationsStream();
   // Stations come from the presence registry (server is the source of
   // truth for which stations exist).  The per-station "online" dot is
@@ -246,6 +251,11 @@ export function App() {
             onResolve={resolveAlert}
             onReopen={reopenAlert}
             onLoadHistory={loadAlertHistory}
+            alertStats={alertStats}
+            hasMoreAlerts={Boolean(alertNextCursor)}
+            alertsLoading={alertsLoading}
+            alertsError={alertsError}
+            onLoadOlder={loadOlderAlerts}
           />
         </div>
 
