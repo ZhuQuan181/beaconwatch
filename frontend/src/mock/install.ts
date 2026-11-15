@@ -50,7 +50,35 @@ function filterObservations(url: URL): Response {
   return jsonResponse(rows.slice(0, limit));
 }
 
-function handleApi(url: URL): Response {
+function handleApi(url: URL, init: RequestInit): Response {
+  const method = (init.method ?? "GET").toUpperCase();
+  const ackMatch = url.pathname.match(/^\/api\/alerts\/([^/]+)\/ack$/);
+  if (ackMatch && method === "POST") {
+    const alertId = decodeURIComponent(ackMatch[1]);
+    const alert = alerts.find((row) => row.alert_id === alertId);
+    if (!alert) {
+      return jsonResponse({ detail: "alert not found" }, 404);
+    }
+    let body: { acknowledged_by?: string; note?: string } = {};
+    try {
+      body = JSON.parse(
+        typeof init.body === "string" ? init.body : "{}",
+      ) as typeof body;
+    } catch {
+      return jsonResponse({ detail: "invalid JSON" }, 400);
+    }
+    const actor = body.acknowledged_by?.trim() ?? "";
+    if (!actor) {
+      return jsonResponse({ detail: "acknowledged_by is required" }, 422);
+    }
+    if (!alert.acknowledged_at) {
+      alert.acknowledged_at = new Date().toISOString();
+      alert.acknowledged_by = actor;
+      alert.acknowledgement_note = body.note?.trim() || null;
+    }
+    return jsonResponse(alert);
+  }
+
   switch (url.pathname) {
     case "/api/health":
       return jsonResponse({ status: "ok" });
@@ -140,7 +168,7 @@ export function installMockApi(): void {
           : input.url;
     const url = new URL(raw, window.location.origin);
     if (url.pathname.startsWith("/api/")) {
-      return Promise.resolve(handleApi(url));
+      return Promise.resolve(handleApi(url, init ?? {}));
     }
     return realFetch(input, init);
   };

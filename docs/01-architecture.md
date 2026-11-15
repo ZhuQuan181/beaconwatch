@@ -54,8 +54,8 @@ BeaconWatch 接收无人机广播的 Remote ID（ASTM F3411 / Open Drone ID）�
 │                          ▼                     ▼                      │
 │                    TimescaleDB          /ws/observations              │
 │                    observations,        WebSocket fan-out             │
-│                    drones, stations,                                  │
-│                    geofence_zones                                     │
+│                    alerts, drones,                                    │
+│                    stations, geofence_zones                          │
 │                          │                                            │
 │                          ▼                                            │
 │                    FastAPI REST API                                    │
@@ -143,7 +143,7 @@ BeaconWatch 接收无人机广播的 Remote ID（ASTM F3411 / Open Drone ID）�
 4. 确保 drone 占位行存在，满足观察表外键；
 5. 插入 observation；只有真正插入的新行才更新 drone 汇总；
 6. 重复消息直接结束，不重复计数、告警或推送；
-7. 提交后执行告警规则并推送 WebSocket。
+7. 提交后执行告警规则，先 upsert 告警账本，再推送 WebSocket。
 
 ### 站点心跳
 
@@ -157,7 +157,13 @@ BeaconWatch 接收无人机广播的 Remote ID（ASTM F3411 / Open Drone ID）�
 - `unidentified`：收到无 `operator_id` 的观测；
 - 同一 `(drone, rule, zone)` 在窗口内去重；
 - `alert_id` 使用稳定 SHA-256 摘要，不使用 Python 加盐 `hash()`；
-- 告警当前保存在进程内有界 ring buffer，服务重启后丢失；原始观测仍在数据库。
+- 告警写入 `alerts` 表，服务重启后仍可查询；
+- 同一 `alert_id` 再次触发时累加 `trigger_count`，保留首次出现时间与确认信息；
+- `POST /alerts/{alert_id}/ack` 记录首次确认的操作员、时间和可选备注；
+- 重复确认是幂等的，不覆盖第一次确认的审计字段；
+- 确认结果通过 WebSocket 广播，其他在线操作员无需刷新即可看到状态；
+- 告警落库失败会记录日志并降级为仅实时推送，不阻断观测入库；
+- 进程内 ring 只作为最近告警的轻量缓存，不再是数据源。
 
 ### HTTP / WebSocket
 
@@ -169,6 +175,7 @@ BeaconWatch 接收无人机广播的 Remote ID（ASTM F3411 / Open Drone ID）�
 - `GET /observations/page`
 - `GET /zones`, `PUT /zones/{zone_id}`
 - `GET /alerts`
+- `POST /alerts/{alert_id}/ack`
 - `WS /ws/observations`
 - `GET /health/live`, `GET /health/ready`, `GET /healthz`
 - `GET /metrics`
@@ -206,6 +213,8 @@ WebSocket 推送以下 frame：
 - 最近站点、station/operator 时间窗和 `(received_at, observation_id)` 游标
   查询都有对应索引；
 - geofence polygon 以 JSON/JSONB 保存，API、规则引擎和地图读取同一份几何；
+- `alerts` 表保存触发次数、首次/最近触发时间以及首次确认审计字段，并按
+  `triggered_at`、`drone_id`、`acknowledged_at` 建立索引；
 - Alembic 在容器启动时自动执行 `upgrade head`。
 
 ## 9. 运维接口
@@ -226,7 +235,7 @@ TLS；Compose 默认仍是开发凭据和明文 MQTT。在公网或不可信网�
 3. MQTT ACL、每站客户端证书/账号和 Broker 侧 TLS 配置；
 4. 密钥管理、数据库最小权限、非默认密码；
 5. 多副本时用 Redis/NATS 等共享总线替代进程内 `ObservationBus`；
-6. 告警持久化、确认/关闭流程和通知集成。
+6. 告警关闭/重新打开、通知集成和保留期限策略。
 
 这些是部署前置条件，不是仓库当前已经实现的功能。
 
@@ -245,6 +254,6 @@ docs/       架构、部署、测试文档
 
 1. RBAC/审计、MQTT ACL、密钥轮换与生产 TLS 渗透测试；
 2. 多站定位/时差融合与轨迹质量评分；
-3. 告警持久化、确认流程和通知渠道；
+3. 告警关闭/重开、通知渠道和保留期限策略；
 4. 多副本共享 WebSocket 总线；
 5. 真实无人机/抓包回放集与现场验收基线。

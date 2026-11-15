@@ -23,6 +23,7 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    Text,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -93,6 +94,52 @@ class GeofenceZone(Base):
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class AlertRecord(Base):
+    """Persistent alert ledger with an operator acknowledgement trail.
+
+    Rule evaluation is still an in-process, observation-derived operation,
+    but the resulting alert and its first acknowledgement are operational
+    records.  They must survive a process restart and remain queryable for
+    an audit, unlike the old bounded in-memory ring.
+    """
+
+    __tablename__ = "alerts"
+
+    alert_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    rule: Mapped[str] = mapped_column(String(32), nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)
+    drone_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    message: Mapped[str] = mapped_column(String(512), nullable=False)
+    detail: Mapped[dict] = mapped_column(
+        JSONB().with_variant(JSON(), "sqlite"),
+        nullable=False,
+        default=dict,
+    )
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    triggered_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    trigger_count: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=1, server_default="1"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    acknowledged_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    acknowledged_by: Mapped[str | None] = mapped_column(String(128))
+    acknowledgement_note: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        Index("ix_alerts_triggered_at", "triggered_at"),
+        Index("ix_alerts_drone_id", "drone_id"),
+        Index("ix_alerts_acknowledged_at", "acknowledged_at"),
     )
 
 

@@ -16,7 +16,14 @@ const HISTORY_LIMIT = 1000;
 const HISTORY_REFRESH_MS = 4_000;
 
 export function App() {
-  const { recent, alerts, total, connected, error } = useObservationsStream();
+  const {
+    recent,
+    alerts,
+    total,
+    connected,
+    error,
+    acknowledgeAlert,
+  } = useObservationsStream();
   // Stations come from the presence registry (server is the source of
   // truth for which stations exist).  The per-station "online" dot is
   // derived from the `recent` stream — a station is only online if
@@ -229,7 +236,11 @@ export function App() {
         </div>
 
         <div className="section section--alerts">
-          <AlertPanel alerts={alerts} onSelectDrone={setSelected} />
+          <AlertPanel
+            alerts={alerts}
+            onSelectDrone={setSelected}
+            onAcknowledge={acknowledgeAlert}
+          />
         </div>
 
         <div className="section" style={{ flex: 1, padding: 0, minHeight: 0 }}>

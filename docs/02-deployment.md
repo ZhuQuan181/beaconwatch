@@ -60,6 +60,21 @@ VITE_API_TOKEN="$RID_API_TOKEN" npm run build
 `Sec-WebSocket-Protocol` 传递 `bearer.<token>`。共享 token 只适合单租户/
 受信网络；公网部署仍应使用反向代理、身份网关和 TLS。
 
+告警查询与确认接口使用同一鉴权：
+
+```bash
+curl -s -H "Authorization: Bearer $RID_API_TOKEN" \
+  http://localhost:8000/alerts
+curl -s -X POST \
+  -H "Authorization: Bearer $RID_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"acknowledged_by":"operator-7","note":"已派发现场核查"}' \
+  "http://localhost:8000/alerts/$ALERT_ID/ack"
+```
+
+首次确认会写入操作员、时间和备注；重复请求返回同一确认记录，不会覆盖原始
+审计信息。
+
 ## 3. 边缘节点
 
 ```bash
@@ -140,7 +155,7 @@ receiver、pipeline、EMQX、数据库和 FastAPI，最后通过 HTTP 检查协�
 升级镜像：
 
 ```bash
-docker build -t beaconwatch-server:0.3.0 ./server
+docker build -t beaconwatch-server:0.4.0 ./server
 docker compose -f server/docker-compose.yml up -d --build rid-server
 ```
 
@@ -169,7 +184,7 @@ cat beaconwatch-YYYYMMDD-HHMMSS.dump | \
 - [ ] 限制 5433/1883/18083/8000 的暴露范围；
 - [ ] 为多副本部署引入共享 WebSocket 总线；
 - [ ] 配置数据库备份、恢复演练和磁盘容量告警；
-- [ ] 将告警从进程内 ring buffer 迁移到持久化存储；
+- [ ] 制定告警保留期限、通知渠道和关闭/重开策略；
 - [ ] 用真实抓包集和现场无人机完成验收测试。
 
 ## 8. 故障排查

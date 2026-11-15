@@ -16,6 +16,7 @@ from .db import dispose_engine, get_session_factory
 from .logging_setup import configure_logging, get_logger
 from .metrics import RequestMetrics
 from .mqtt_subscriber import MqttSubscriber
+from .repository import alert_to_out, list_alerts
 from .routes import router, ws_router
 from .security import RequestContextMiddleware, require_api_token
 from .settings_state import set_subscriber_bus_hook
@@ -40,6 +41,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # engine here (not per message) keeps dedup state across messages —
     # a hovering drone would otherwise re-alert at 4 Hz.
     app.state.alerts = AlertRing(capacity=200)
+    # The API reads the durable ledger directly, but keeping the recent
+    # ring warm preserves the lightweight in-process view used by
+    # operations and makes restart behavior predictable for any caller
+    # that still reads app.state.alerts.
+    try:
+        factory = get_session_factory()
+        async with factory() as session:
+            recent = await list_alerts(session, limit=app.state.alerts.capacity)
+        for row in reversed(recent):
+            app.state.alerts.add(
+                alert_to_out(row).model_dump(mode="json")
+            )
+    except Exception as exc:  # noqa: BLE001
+        # A missing pre-migration table must not prevent the receiver
+        # from starting; live alerts will still attempt persistence.
+        log.warning("alerts.restore.failed", error=str(exc)[:200])
     engine = AlertEngine(
         max_alt_m=settings.alert_max_alt_m,
         unidentified=settings.alert_unidentified,
@@ -64,7 +81,7 @@ def create_app() -> FastAPI:
     request_metrics = RequestMetrics()
     app = FastAPI(
         title="RID Server",
-        version="0.3.0",
+        version="0.4.0",
         lifespan=lifespan,
     )
     app.state.settings = settings
@@ -76,7 +93,7 @@ def create_app() -> FastAPI:
         app.add_middleware(
             CORSMiddleware,
             allow_origins=settings.cors_origin_list,
-            allow_methods=["GET", "PUT", "OPTIONS"],
+            allow_methods=["GET", "POST", "PUT", "OPTIONS"],
             allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
             expose_headers=["X-Request-ID", "X-Next-Cursor"],
             max_age=600,

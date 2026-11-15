@@ -9,12 +9,13 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Sequence
 
-from sqlalchemy import and_, case, or_, select
+from sqlalchemy import and_, case, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .db import Drone, Observation, Station
-from .models import DroneObservation, DroneSummary, Position
+from .alerts import Alert
+from .db import AlertRecord, Drone, Observation, Station
+from .models import AlertOut, DroneObservation, DroneSummary, Position
 from .models import Station as StationModel
 
 
@@ -289,6 +290,177 @@ async def list_unidentified_drones(
         stmt = stmt.where(Observation.received_at >= since)
     result = await session.execute(stmt)
     return [r[0] for r in result.all()]
+
+
+# ── Alerts ────────────────────────────────────────────────────────────
+def _parse_alert_time(value: str, fallback: datetime) -> datetime:
+    if not value:
+        return fallback
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return fallback
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _iso(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def alert_to_out(row: AlertRecord) -> AlertOut:
+    """Map a durable alert row to the public wire shape."""
+    return AlertOut(
+        alert_id=row.alert_id,
+        rule=row.rule,
+        severity=row.severity,
+        drone_id=row.drone_id,
+        message=row.message,
+        detail=row.detail or {},
+        at=_iso(row.triggered_at) or "",
+        first_seen_at=_iso(row.first_seen_at),
+        trigger_count=row.trigger_count,
+        acknowledged_at=_iso(row.acknowledged_at),
+        acknowledged_by=row.acknowledged_by,
+        acknowledgement_note=row.acknowledgement_note,
+    )
+
+
+def transient_alert_to_out(alert: Alert) -> AlertOut:
+    """Wire shape used only when persisting an alert fails."""
+    return AlertOut(
+        alert_id=alert.alert_id,
+        rule=alert.rule,
+        severity=alert.severity,
+        drone_id=alert.drone_id,
+        message=alert.message,
+        detail=alert.detail,
+        at=alert.at,
+        first_seen_at=alert.at or None,
+        trigger_count=1,
+    )
+
+
+async def upsert_alert(
+    session: AsyncSession,
+    alert: Alert,
+    *,
+    now: datetime | None = None,
+) -> AlertRecord:
+    """Insert an alert, or record a later recurrence of the same alert id.
+
+    ``alert_id`` is deterministic per (drone, rule, zone), so a recurrence
+    after the rule dedup window must update the existing operational row
+    rather than create a duplicate.  The first observation time and any
+    acknowledgement are deliberately preserved.
+    """
+    observed_at = _parse_alert_time(
+        alert.at, now or datetime.now(tz=timezone.utc)
+    )
+    stmt = (
+        pg_insert(AlertRecord)
+        .values(
+            alert_id=alert.alert_id,
+            rule=alert.rule,
+            severity=alert.severity,
+            drone_id=alert.drone_id,
+            message=alert.message[:512],
+            detail=alert.detail,
+            first_seen_at=observed_at,
+            triggered_at=observed_at,
+            trigger_count=1,
+        )
+        .on_conflict_do_update(
+            index_elements=["alert_id"],
+            set_=dict(
+                rule=alert.rule,
+                severity=alert.severity,
+                drone_id=alert.drone_id,
+                message=alert.message[:512],
+                detail=alert.detail,
+                first_seen_at=case(
+                    (
+                        AlertRecord.first_seen_at > observed_at,
+                        observed_at,
+                    ),
+                    else_=AlertRecord.first_seen_at,
+                ),
+                triggered_at=case(
+                    (
+                        AlertRecord.triggered_at <= observed_at,
+                        observed_at,
+                    ),
+                    else_=AlertRecord.triggered_at,
+                ),
+                trigger_count=AlertRecord.trigger_count + 1,
+            ),
+        )
+    )
+    await session.execute(stmt)
+    await session.commit()
+    row = await session.get(AlertRecord, alert.alert_id)
+    if row is None:  # pragma: no cover - only possible after a lost commit
+        raise RuntimeError("alert upsert did not produce a row")
+    await session.refresh(row)
+    return row
+
+
+async def list_alerts(
+    session: AsyncSession, *, limit: int = 50
+) -> Sequence[AlertRecord]:
+    stmt = (
+        select(AlertRecord)
+        .order_by(
+            AlertRecord.triggered_at.desc(),
+            AlertRecord.alert_id.desc(),
+        )
+        .limit(limit)
+    )
+    result = await session.execute(stmt)
+    return result.scalars().all()
+
+
+async def acknowledge_alert(
+    session: AsyncSession,
+    alert_id: str,
+    *,
+    acknowledged_by: str,
+    note: str = "",
+    now: datetime | None = None,
+) -> AlertRecord | None:
+    """Record the first acknowledgement for an alert.
+
+    The conditional UPDATE makes concurrent acknowledgements safe: only
+    one request can transition the row from unacknowledged to
+    acknowledged, and every retry returns that same audit record.
+    """
+    row = await session.get(AlertRecord, alert_id)
+    if row is None:
+        return None
+    if row.acknowledged_at is None:
+        await session.execute(
+            update(AlertRecord)
+            .where(
+                AlertRecord.alert_id == alert_id,
+                AlertRecord.acknowledged_at.is_(None),
+            )
+            .values(
+                acknowledged_at=now or datetime.now(tz=timezone.utc),
+                acknowledged_by=acknowledged_by.strip()[:128],
+                acknowledgement_note=note.strip()[:1000] or None,
+            )
+        )
+        await session.commit()
+        row = await session.get(AlertRecord, alert_id)
+        if row is None:  # pragma: no cover
+            return None
+        await session.refresh(row)
+    return row
 
 
 async def list_drones(

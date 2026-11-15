@@ -26,6 +26,7 @@ from .config import get_settings
 from .db import GeofenceZone, Observation, get_session
 from .logging_setup import get_logger
 from .models import (
+    AlertAckIn,
     AlertOut,
     DroneObservation,
     DroneSummary,
@@ -36,8 +37,11 @@ from .models import (
 )
 from .pagination import decode_cursor, encode_cursor
 from .repository import (
+    acknowledge_alert,
+    alert_to_out,
     drone_to_summary,
     get_drone,
+    list_alerts,
     list_drones,
     list_observations,
     list_stations,
@@ -147,20 +151,46 @@ async def upsert_zone(
 # ── Alerts ────────────────────────────────────────────────────────────
 @router.get("/alerts", response_model=list[AlertOut])
 async def get_alerts(
-    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
 ) -> list[AlertOut]:
-    """Alerts seen by this process since startup.
+    """Return the durable alert ledger, newest trigger first."""
+    rows = await list_alerts(session, limit=limit)
+    return [alert_to_out(row) for row in rows]
 
-    In-memory, not persisted: an alert is a *derived* fact about
-    observations that are already stored, so recomputing beats a second
-    table that can disagree with the observations.  Surviving restarts
-    would need a persisted table; out of scope for a demo build.
+
+@router.post("/alerts/{alert_id}/ack", response_model=AlertOut)
+async def acknowledge_alert_route(
+    alert_id: str,
+    body: AlertAckIn,
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> AlertOut:
+    """Acknowledge an alert once and return the stored audit record.
+
+    Repeated calls are idempotent: the first operator, timestamp and note
+    are never overwritten by a retry.
     """
+    row = await acknowledge_alert(
+        session,
+        alert_id,
+        acknowledged_by=body.acknowledged_by,
+        note=body.note,
+    )
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="alert not found")
+    result = alert_to_out(row)
+    payload = result.model_dump(mode="json")
     ring = getattr(request.app.state, "alerts", None)
-    if ring is None:
-        return []
-    return [AlertOut(**a) for a in list(ring)[-limit:]]
+    if ring is not None:
+        ring.add(payload)
+    bus = getattr(request.app.state, "bus", None)
+    if bus is not None:
+        try:
+            await bus.publish_alert(payload)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("alert.ack.broadcast.failed", error=str(exc)[:200])
+    return result
 
 
 # ── Drones ────────────────────────────────────────────────────────────
@@ -559,6 +589,7 @@ _KNOWN_PREFIXES: tuple[str, ...] = (
     "/stations",
     "/drones",
     "/observations",
+    "/alerts",
     "/healthz",
     "/metrics",
     "/ws/observations",

@@ -30,6 +30,15 @@ export interface StreamState {
   lastMessageAt: number | null;
 }
 
+export interface ObservationStream extends StreamState {
+  /** Persist the first operator acknowledgement and update local state. */
+  acknowledgeAlert: (
+    alertId: string,
+    acknowledgedBy: string,
+    note?: string,
+  ) => Promise<Alert>;
+}
+
 function mergeObservationRows(
   current: DroneObservation[],
   incoming: DroneObservation[],
@@ -44,7 +53,39 @@ function mergeObservationRows(
     .slice(0, MAX_RETAIN);
 }
 
-export function useObservationsStream(wsUrl = "/ws/observations") {
+function mergeAlert(current: Alert | undefined, incoming: Alert): Alert {
+  if (!current) return incoming;
+  const currentAt = Date.parse(current.at);
+  const incomingAt = Date.parse(incoming.at);
+  const latestAt =
+    Number.isFinite(currentAt) &&
+    (!Number.isFinite(incomingAt) || currentAt > incomingAt)
+      ? current.at
+      : incoming.at;
+  const firstSeen = [current.first_seen_at, incoming.first_seen_at]
+    .filter((value): value is string => Boolean(value))
+    .sort((a, b) => Date.parse(a) - Date.parse(b))[0];
+  const merged: Alert = {
+    ...incoming,
+    at: latestAt,
+    first_seen_at: firstSeen ?? incoming.first_seen_at ?? current.first_seen_at,
+    trigger_count: Math.max(
+      current.trigger_count ?? 1,
+      incoming.trigger_count ?? 1,
+    ),
+  };
+  // There is no reopen flow yet, so an acknowledgement is monotonic.
+  if (current.acknowledged_at) {
+    merged.acknowledged_at = current.acknowledged_at;
+    merged.acknowledged_by = current.acknowledged_by;
+    merged.acknowledgement_note = current.acknowledgement_note;
+  }
+  return merged;
+}
+
+export function useObservationsStream(
+  wsUrl = "/ws/observations",
+): ObservationStream {
   const [state, setState] = useState<StreamState>({
     recent: [],
     alerts: [],
@@ -66,6 +107,28 @@ export function useObservationsStream(wsUrl = "/ws/observations") {
     }
   }, []);
 
+  const acknowledgeAlert = useCallback(
+    async (alertId: string, acknowledgedBy: string, note = "") => {
+      const updated = await api.acknowledgeAlert(alertId, {
+        acknowledged_by: acknowledgedBy,
+        note,
+      });
+      setState((current) => {
+        const exists = current.alerts.some(
+          (alert) => alert.alert_id === updated.alert_id,
+        );
+        const alerts = exists
+          ? current.alerts.map((alert) =>
+              alert.alert_id === updated.alert_id ? updated : alert,
+            )
+          : [updated, ...current.alerts].slice(0, MAX_ALERTS);
+        return { ...current, alerts };
+      });
+      return updated;
+    },
+    [],
+  );
+
   // Alerts predate this page load.  Without the seed the panel is empty
   // until the next offending fix arrives, which on a quiet feed looks
   // like "no alerts" rather than "nothing new since you opened it".
@@ -76,8 +139,13 @@ export function useObservationsStream(wsUrl = "/ws/observations") {
       .then((rows) => {
         if (!rows.length || controller.signal.aborted) return;
         setState((s) => {
-          const seen = new Set(s.alerts.map((a) => a.alert_id));
-          const merged = [...s.alerts, ...rows.filter((a) => !seen.has(a.alert_id))]
+          const byId = new Map(
+            s.alerts.map((alert) => [alert.alert_id, alert]),
+          );
+          for (const row of rows) {
+            byId.set(row.alert_id, mergeAlert(byId.get(row.alert_id), row));
+          }
+          const merged = [...byId.values()]
             .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
             .slice(0, MAX_ALERTS);
           return { ...s, alerts: merged };
@@ -163,7 +231,11 @@ export function useObservationsStream(wsUrl = "/ws/observations") {
             return {
               ...s,
               alerts: exists
-                ? s.alerts
+                ? s.alerts.map((alert) =>
+                    alert.alert_id === frame.data.alert_id
+                      ? mergeAlert(alert, frame.data)
+                      : alert,
+                  )
                 : [frame.data, ...s.alerts].slice(0, MAX_ALERTS),
               lastMessageAt: Date.now(),
             };
@@ -234,5 +306,5 @@ export function useObservationsStream(wsUrl = "/ws/observations") {
     };
   }, [clearWatchdog, connect]);
 
-  return state;
+  return { ...state, acknowledgeAlert };
 }

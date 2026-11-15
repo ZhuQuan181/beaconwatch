@@ -3,10 +3,12 @@ import {
   Map as MapLibreMap,
   NavigationControl,
   Popup,
+  setWorkerUrl,
   type GeoJSONSource,
   type Map as MlMap,
   type StyleSpecification,
 } from "maplibre-gl";
+import mapLibreWorkerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?url";
 import "maplibre-gl/dist/maplibre-gl.css";
 import type { DroneObservation, GeofenceZone, Station } from "../types";
 
@@ -57,6 +59,12 @@ const STYLE: StyleSpecification = {
   },
   layers: [{ id: "basemap", type: "raster", source: "basemap" }],
 };
+
+// Vite emits the library's worker next to the hashed application assets.
+// Without this explicit URL, MapLibre guesses a sibling path that only
+// exists in the npm package, so production and Pages builds log worker
+// load failures while still painting the raster basemap.
+setWorkerUrl(mapLibreWorkerUrl);
 
 function stationsToGeoJSON(stations: Station[]): GeoJSON.FeatureCollection {
   return {

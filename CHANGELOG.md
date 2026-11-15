@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.4.0 - 2026-11-15
+
+### Added
+
+- Durable alert ledger backed by a new `alerts` table and Alembic migration;
+  alert history now survives server restarts.
+- `POST /alerts/{alert_id}/ack` records the first operator acknowledgement,
+  timestamp, actor and optional note as an audit trail.
+- Deterministic alert recurrence handling: the same alert ID increments
+  `trigger_count`, updates the latest trigger time and preserves the original
+  first-seen and acknowledgement metadata.
+- Acknowledged-state WebSocket broadcasts keep every open dashboard in sync.
+- Dashboard acknowledgement controls, operator-name persistence and optional
+  handling notes; the static demo implements the same REST contract.
+- Recent alerts are restored into the in-process operational ring at startup.
+- Alert persistence failures are logged and degraded to live-only delivery;
+  they do not block observation ingest or suppress the WebSocket alert.
+- The static demo build now always enables its mock transport instead of
+  relying on an external environment variable.
+
+### Changed
+
+- `GET /alerts` now reads the durable ledger newest-trigger first instead of
+  returning only alerts produced by the current process.
+- MapLibre's worker is emitted as an explicit Vite asset, so production and
+  Pages builds no longer request a worker file that only exists in the npm
+  package.
+- Dashboard layout resets the document box model and confines scrolling to the
+  alert list instead of nesting page/sidebar scroll containers.
+- Repository/package metadata advanced to 0.4.0.
+- Documentation now reflects the implemented alert workflow and removes alert
+  persistence from the production-gap checklist.
+
 ## 0.3.0 - 2026-11-15
 
 ### Added

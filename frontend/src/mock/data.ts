@@ -211,6 +211,8 @@ export function seedHistory(pointsPerDrone = 90, intervalMs = 2000): void {
       message: "Drone entered Alcatraz No-Fly zone",
       detail: { zone_id: "ZONE-ALCATRAZ", zone_name: "Alcatraz No-Fly" },
       at: new Date(now - 42_000).toISOString(),
+      first_seen_at: new Date(now - 42_000).toISOString(),
+      trigger_count: 1,
     },
     {
       alert_id: "alert-mock-002",
@@ -220,6 +222,8 @@ export function seedHistory(pointsPerDrone = 90, intervalMs = 2000): void {
       message: "Unidentified drone broadcasting without a Remote ID",
       detail: { station_id: "ST-03" },
       at: new Date(now - 96_000).toISOString(),
+      first_seen_at: new Date(now - 96_000).toISOString(),
+      trigger_count: 1,
     },
     {
       alert_id: "alert-mock-003",
@@ -229,6 +233,8 @@ export function seedHistory(pointsPerDrone = 90, intervalMs = 2000): void {
       message: "Drone above 300 m advisory ceiling",
       detail: { altitude_m: 330, ceiling_m: 300 },
       at: new Date(now - 155_000).toISOString(),
+      first_seen_at: new Date(now - 155_000).toISOString(),
+      trigger_count: 1,
     },
   );
 }

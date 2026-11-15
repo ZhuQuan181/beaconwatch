@@ -1,3 +1,18 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
 .app {
   display: grid;
   grid-template-columns: 360px 1fr;
@@ -35,9 +50,10 @@ header.topbar .stat {
 aside.sidebar {
   background: #0f1219;
   border-right: 1px solid #1c2030;
-  overflow-y: auto;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
+  min-height: 0;
 }
 aside.sidebar .section {
   padding: 12px 14px;
@@ -354,7 +370,8 @@ header.topbar .stat--replay {
    makes them read as urgent rather than decorative. */
 .section--alerts {
   flex: 0 0 auto;
-  max-height: 40%;
+  min-height: 236px;
+  max-height: 46%;
   overflow-y: auto;
   padding: 12px 14px;
 }
@@ -382,6 +399,42 @@ header.topbar .stat--replay {
   font-size: 12px;
   color: #58627a;
 }
+.alert-tools {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.alert-tools label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  font-size: 10px;
+  color: #6f7a8c;
+}
+.alert-tools label > span { white-space: nowrap; }
+.alert-tools label:first-child { flex: 0 0 138px; }
+.alert-note-field { flex: 1 1 auto; }
+.alert-tools input {
+  width: 100%;
+  min-width: 0;
+  padding: 4px 6px;
+  border: 1px solid #2a3142;
+  border-radius: 3px;
+  background: #11151e;
+  color: #cdd4e0;
+  font: inherit;
+  font-size: 11px;
+}
+.alert-tools input:focus {
+  outline: 1px solid #5cc8ff;
+  border-color: #5cc8ff;
+}
+.alert-error {
+  margin: 0 0 7px;
+  color: #ff8b84;
+  font-size: 10.5px;
+}
 
 .alert-list {
   list-style: none;
@@ -404,6 +457,8 @@ header.topbar .stat--replay {
 .alert-row:hover { background: #1b2130; }
 .alert-row.sev-critical { background: rgba(255, 59, 48, .09); }
 .alert-row.sev-critical:hover { background: rgba(255, 59, 48, .14); }
+.alert-row.acked { opacity: .68; }
+.alert-row.acked .alert-mark { background: #35b66f; }
 
 .alert-mark {
   border-radius: 2px;
@@ -454,6 +509,35 @@ header.topbar .stat--replay {
   color: #58627a;
   font-variant-numeric: tabular-nums;
   margin-top: 1px;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+}
+.alert-ack-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #64b98a;
+}
+.alert-ack-button {
+  margin-left: auto;
+  padding: 2px 7px;
+  border: 1px solid #35556b;
+  border-radius: 3px;
+  background: #172633;
+  color: #8fd8ff;
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+.alert-ack-button:hover:not(:disabled) {
+  border-color: #5cc8ff;
+  background: #1d3344;
+}
+.alert-ack-button:disabled {
+  color: #66717f;
+  cursor: wait;
 }
 
 /* ── Ghost drone marker in the sidebar ───────────────────────────

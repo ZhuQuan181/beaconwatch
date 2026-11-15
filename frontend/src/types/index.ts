@@ -82,6 +82,11 @@ export interface Alert {
   message: string;
   detail: Record<string, unknown>;
   at: string;
+  first_seen_at?: string | null;
+  trigger_count?: number;
+  acknowledged_at?: string | null;
+  acknowledged_by?: string | null;
+  acknowledgement_note?: string | null;
 }
 
 /** Frame sent by the server over /ws/observations. */

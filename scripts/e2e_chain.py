@@ -40,8 +40,11 @@ from rid_edge.odid_parser import message_pack  # noqa: E402
 from rid_edge.pipeline import PipelineManager  # noqa: E402
 from rid_edge.receivers.base import Bearer, RawFrame  # noqa: E402
 from rid_edge.receivers.wifi_nan import WifiReceiver  # noqa: E402
+from rid_server.alerts import AlertEngine, AlertRing  # noqa: E402
+from rid_server.bus import ObservationBus  # noqa: E402
 from rid_server.config import get_settings  # noqa: E402
 from rid_server.mqtt_subscriber import MqttSubscriber  # noqa: E402
+from rid_server.settings_state import set_subscriber_bus_hook  # noqa: E402
 from scapy.layers.dot11 import RadioTap  # noqa: E402
 
 
@@ -109,7 +112,7 @@ async def main() -> int:
 
     identified, ghost = _build_observations(run, station)
     print(
-        f"[1/5] decoded official frames: identified={identified.drone_id} "
+        f"[1/6] decoded official frames: identified={identified.drone_id} "
         f"ghost={ghost.drone_id}"
     )
 
@@ -121,14 +124,23 @@ async def main() -> int:
         received.append(obs.observation_id)
 
     subscriber = MqttSubscriber(settings)
-    subscriber.on_persisted = on_persisted
+    subscriber.alerts = AlertEngine(max_alt_m=None, unidentified=True)
+    set_subscriber_bus_hook(subscriber, ObservationBus(), AlertRing())
+    publish_persisted = subscriber.on_persisted
+
+    async def collect_and_publish(obs) -> None:
+        await on_persisted(obs)
+        if publish_persisted is not None:
+            await publish_persisted(obs)
+
+    subscriber.on_persisted = collect_and_publish
 
     async with aiomqtt.Client(
         hostname=settings.mqtt_host,
         port=settings.mqtt_port,
         identifier=f"rid-e2e-pub-{run}",
     ) as publisher:
-        print(f"[2/5] connected to MQTT {settings.mqtt_host}:{settings.mqtt_port}")
+        print(f"[2/6] connected to MQTT {settings.mqtt_host}:{settings.mqtt_port}")
 
         async def run_subscriber() -> None:
             try:
@@ -142,7 +154,7 @@ async def main() -> int:
         for obs in persisted:
             await publisher.publish(topic, obs.to_mqtt_payload(), qos=1)
             print(
-                f"[3/5] published {obs.observation_id[:16]}… "
+                f"[3/6] published {obs.observation_id[:16]}… "
                 f"protocol={obs.protocol.value}"
             )
 
@@ -157,7 +169,7 @@ async def main() -> int:
         except (asyncio.CancelledError, Exception):  # noqa: BLE001
             pass
 
-    print(f"[4/5] subscriber persisted {len(received)}/{len(persisted)}")
+    print(f"[4/6] subscriber persisted {len(received)}/{len(persisted)}")
     if errors:
         for error in errors:
             print(f"      FAIL: {error}")
@@ -190,8 +202,34 @@ async def main() -> int:
             if row["observation_id"] in received and row["station_id"] == station
         ]
         ghost_ids = await client.get("/drones/unidentified")
+        alert_response = await client.get("/alerts", params={"limit": 200})
+        alert_response.raise_for_status()
+        run_alerts = [
+            alert
+            for alert in alert_response.json()
+            if alert["drone_id"] == ghost.drone_id
+        ]
+        acknowledged = None
+        retried = None
+        if run_alerts:
+            alert = run_alerts[0]
+            ack_response = await client.post(
+                f"/alerts/{alert['alert_id']}/ack",
+                json={
+                    "acknowledged_by": "e2e-operator",
+                    "note": "end-to-end acknowledgement",
+                },
+            )
+            ack_response.raise_for_status()
+            acknowledged = ack_response.json()
+            retry_response = await client.post(
+                f"/alerts/{alert['alert_id']}/ack",
+                json={"acknowledged_by": "retry-operator"},
+            )
+            retry_response.raise_for_status()
+            retried = retry_response.json()
 
-    print(f"[5/5] HTTP returned {len(rows)}/{len(persisted)} of our rows")
+    print(f"[5/6] HTTP returned {len(rows)}/{len(persisted)} of our rows")
     for row in rows:
         print(
             f"      {row['observation_id'][:16]}… drone={row['drone_id']} "
@@ -221,9 +259,28 @@ async def main() -> int:
     if operator_location.get("lat") is None:
         print("FAIL: operator location was lost between ingest and HTTP")
         ok = False
+    if not run_alerts:
+        print("FAIL: unidentified alert was not persisted")
+        ok = False
+    else:
+        alert = run_alerts[0]
+        if acknowledged is None or retried is None:
+            print("FAIL: acknowledgement requests did not complete")
+            ok = False
+        else:
+            print(
+                f"[6/6] alert {alert['alert_id']} persisted and acknowledged "
+                f"by {acknowledged['acknowledged_by']}"
+            )
+            if acknowledged.get("acknowledged_by") != "e2e-operator":
+                print("FAIL: acknowledgement actor was not persisted")
+                ok = False
+            if retried.get("acknowledged_by") != "e2e-operator":
+                print("FAIL: retried acknowledgement overwrote the audit trail")
+                ok = False
 
     print(
-        "PASS: official radio bytes -> MQTT -> server -> DB -> HTTP verified"
+        "PASS: official radio bytes -> MQTT -> DB -> HTTP -> alert ack verified"
         if ok
         else "FAILED"
     )

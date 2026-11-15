@@ -65,6 +65,8 @@ async function fetchOnce<T>(
   path: string,
   timeoutMs: number,
   signal?: AbortSignal,
+  method: "GET" | "POST" = "GET",
+  body?: unknown,
 ): Promise<T> {
   const controller = new AbortController();
   let timedOut = false;
@@ -83,14 +85,17 @@ async function fetchOnce<T>(
   try {
     const headers: Record<string, string> = {};
     if (API_TOKEN) headers.Authorization = `Bearer ${API_TOKEN}`;
+    if (body !== undefined) headers["Content-Type"] = "application/json";
     const res = await fetch(`${BASE}${path}`, {
+      method,
       headers,
       signal: controller.signal,
       cache: "no-store",
+      body: body === undefined ? undefined : JSON.stringify(body),
     });
     if (!res.ok) {
       throw new ApiError(
-        `GET ${path} failed: ${res.status} ${res.statusText}`,
+        `${method} ${path} failed: ${res.status} ${res.statusText}`,
         res.status,
         res.status === 429 || res.status >= 500,
       );
@@ -98,7 +103,7 @@ async function fetchOnce<T>(
     return (await res.json()) as T;
   } catch (error) {
     if (timedOut) {
-      throw new ApiError(`GET ${path} timed out`, undefined, true);
+      throw new ApiError(`${method} ${path} timed out`, undefined, true);
     }
     if (signal?.aborted) {
       throw new DOMException("Aborted", "AbortError");
@@ -110,12 +115,14 @@ async function fetchOnce<T>(
   }
 }
 
-async function jsonGet<T>(
+async function jsonRequest<T>(
   path: string,
   options: {
     signal?: AbortSignal;
     timeoutMs?: number;
     retries?: number;
+    method?: "GET" | "POST";
+    body?: unknown;
   } = {},
 ): Promise<T> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -124,7 +131,13 @@ async function jsonGet<T>(
 
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     try {
-      return await fetchOnce<T>(path, timeoutMs, options.signal);
+      return await fetchOnce<T>(
+        path,
+        timeoutMs,
+        options.signal,
+        options.method ?? "GET",
+        options.body,
+      );
     } catch (error) {
       lastError = error;
       if (options.signal?.aborted || !isRetryable(error) || attempt === retries) {
@@ -134,6 +147,29 @@ async function jsonGet<T>(
     }
   }
   throw lastError;
+}
+
+async function jsonGet<T>(
+  path: string,
+  options: {
+    signal?: AbortSignal;
+    timeoutMs?: number;
+    retries?: number;
+  } = {},
+): Promise<T> {
+  return jsonRequest<T>(path, options);
+}
+
+async function jsonPost<T>(
+  path: string,
+  body: unknown,
+  options: {
+    signal?: AbortSignal;
+    timeoutMs?: number;
+    retries?: number;
+  } = {},
+): Promise<T> {
+  return jsonRequest<T>(path, { ...options, method: "POST", body });
 }
 
 export const api = {
@@ -213,4 +249,15 @@ export const api = {
 
   listAlerts: (limit = 50, signal?: AbortSignal) =>
     jsonGet<Alert[]>(`/alerts?limit=${limit}`, { signal }),
+
+  acknowledgeAlert: (
+    alertId: string,
+    body: { acknowledged_by: string; note?: string },
+    signal?: AbortSignal,
+  ) =>
+    jsonPost<Alert>(
+      `/alerts/${encodeURIComponent(alertId)}/ack`,
+      body,
+      { signal },
+    ),
 };

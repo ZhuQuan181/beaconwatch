@@ -246,8 +246,16 @@ class AlertRing:
         self.capacity = capacity
         self._items: list[dict[str, Any]] = []
 
-    def add(self, alert: Alert) -> None:
-        self._items.append(alert.__dict__)
+    def add(self, alert: Alert | dict[str, Any]) -> None:
+        item = alert.__dict__ if isinstance(alert, Alert) else dict(alert)
+        alert_id = item.get("alert_id")
+        if alert_id:
+            self._items = [
+                existing
+                for existing in self._items
+                if existing.get("alert_id") != alert_id
+            ]
+        self._items.append(item)
         if len(self._items) > self.capacity:
             del self._items[: len(self._items) - self.capacity]
 

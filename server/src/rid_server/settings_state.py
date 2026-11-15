@@ -9,8 +9,13 @@ Why a module rather than passing the bus through ``MqttSubscriber.__init__``?
 """
 from __future__ import annotations
 
+from . import repository
 from .bus import ObservationBus
+from .db import get_session_factory
+from .logging_setup import get_logger
 from .mqtt_subscriber import MqttSubscriber
+
+log = get_logger(__name__)
 
 
 def set_subscriber_bus_hook(
@@ -29,9 +34,26 @@ def set_subscriber_bus_hook(
         await bus.publish(obs)
 
     async def _on_alert(alert) -> None:  # type: ignore[no-untyped-def]
+        payload = repository.transient_alert_to_out(alert).model_dump(
+            mode="json"
+        )
+        try:
+            factory = get_session_factory()
+            async with factory() as session:
+                row = await repository.upsert_alert(session, alert)
+            payload = repository.alert_to_out(row).model_dump(mode="json")
+        except Exception as exc:  # noqa: BLE001
+            # Alert persistence is valuable but must never suppress the
+            # live alert or break observation ingest.  The fallback keeps
+            # the operator panel working while the failure is logged.
+            log.warning(
+                "alert.persist.failed",
+                alert_id=getattr(alert, "alert_id", ""),
+                error=str(exc)[:200],
+            )
         if ring is not None:
-            ring.add(alert)
-        await bus.publish_alert(alert)
+            ring.add(payload)
+        await bus.publish_alert(payload)
 
     subscriber.on_persisted = _on_persisted
     subscriber.on_alert = _on_alert

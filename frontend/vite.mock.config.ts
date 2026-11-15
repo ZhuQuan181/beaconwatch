@@ -4,6 +4,13 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
   // Static demo build served from https://<user>.github.io/beaconwatch/
   base: "/beaconwatch/",
+  // This config is only used for the static demo.  Defining the flag
+  // here means `npm run build:mock` cannot accidentally produce a
+  // production build that calls a nonexistent backend (which is what
+  // CI and local smoke tests used to do).
+  define: {
+    "import.meta.env.VITE_MOCK": JSON.stringify("1"),
+  },
   plugins: [react()],
   build: {
     outDir: "dist",

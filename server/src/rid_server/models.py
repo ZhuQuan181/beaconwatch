@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class Position(BaseModel):
@@ -107,7 +107,7 @@ class StationInfo(BaseModel):
     station_id: str = Field(min_length=1, max_length=64)
     location: Position
     name: str | None = Field(default=None, max_length=128)
-    firmware_version: str = Field(default="0.3.0", max_length=32)
+    firmware_version: str = Field(default="0.4.0", max_length=32)
     capabilities: list[str] = Field(default_factory=lambda: ["ble", "wifi_nan"])
 
 
@@ -130,8 +130,34 @@ class AlertOut(BaseModel):
     severity: str
     drone_id: str
     message: str
-    detail: dict = {}
+    detail: dict = Field(default_factory=dict)
     at: str = ""
+    first_seen_at: str | None = None
+    trigger_count: int = 1
+    acknowledged_at: str | None = None
+    acknowledged_by: str | None = None
+    acknowledgement_note: str | None = None
+
+
+class AlertAckIn(BaseModel):
+    """Operator acknowledgement for one alert.
+
+    The first acknowledgement wins.  Repeating the request is idempotent
+    so a retried HTTP call cannot overwrite the original audit trail.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    acknowledged_by: str = Field(min_length=1, max_length=128)
+    note: str = Field(default="", max_length=1000)
+
+    @field_validator("acknowledged_by")
+    @classmethod
+    def acknowledged_by_must_not_be_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("acknowledged_by must not be blank")
+        return value
 
 
 class DroneSummary(BaseModel):

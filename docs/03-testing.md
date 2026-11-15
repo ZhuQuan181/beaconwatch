@@ -40,6 +40,9 @@ PYTHONPATH=server/src .venv/bin/python -m pytest -q server/tests
 - WebSocket 心跳、fan-out、慢消费者丢弃策略；
 - 禁飞区/限高/未识别告警；
 - 稳定 alert ID；
+- 告警账本 upsert、重复触发计数、乱序触发不倒退时间；
+- 告警确认幂等、未知告警 404、确认状态 WebSocket 广播；
+- 告警落库失败时仍下发实时告警；
 - health/readiness/metrics；
 - MQTT TLS 上下文与证书配对校验；
 - 操作员位置、精度、RSSI 在 DB 和 HTTP 之间的保真。
@@ -61,7 +64,8 @@ make e2e
 ```
 
 前置是 `make up`。脚本使用真实 EMQX、TimescaleDB、MqttSubscriber、repository
-和 FastAPI 路由，验证官方帧最终能通过 HTTP 查询。
+和 FastAPI 路由，验证官方帧最终能通过 HTTP 查询，并确认未识别告警已落库、
+首次确认审计字段可读且重复确认不会覆盖原记录。
 
 ### 前端
 
@@ -74,6 +78,7 @@ npm run build
 ```
 
 构建把 MapLibre 拆成独立 vendor chunk。生产依赖审计必须为 0 个 high/critical。
+静态 mock 构建还必须覆盖告警确认接口，避免 Pages 演示出现只读回归。
 
 ### Docker 冷启动
 
