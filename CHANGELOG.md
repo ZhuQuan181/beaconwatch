@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.6.0 - 2026-11-16
+
+### Added
+
+- Durable `notification_outbox` table and Alembic `0007` migration for alert
+  lifecycle webhooks.
+- Atomic enqueueing for triggered, acknowledged, resolved and reopened alert
+  transitions, including automatic recurrence reopening.
+- Background notification worker with per-alert ordering, cross-alert
+  concurrency, an earlier-event ordering barrier, PostgreSQL `SKIP LOCKED`
+  claims and expiring recovery leases.
+- HMAC-SHA256 request signing, stable `delivery_id` idempotency keys,
+  configurable timeouts, bounded jittered exponential backoff, permanent-failure
+  classification and dead-lettering after the configured attempt limit.
+- Direct webhook egress by default, with explicit
+  `RID_NOTIFY_WEBHOOK_TRUST_ENV` opt-in for deployments that require an
+  environment-configured HTTP(S) proxy.
+- Prometheus metrics for pending/delivering/delivered/dead outbox rows,
+  cumulative attempts/failures, worker state and last successful delivery.
+- Server tests for transactional enqueue, idempotent lifecycle events, signing,
+  timeout/5xx/4xx behavior, retries, dead letters, lease recovery, API wiring,
+  metrics and notification failure isolation.
+
+### Changed
+
+- The real official-frame E2E now starts a local HMAC-verifying webhook receiver
+  and checks triggered, acknowledged, resolved, reopened and final resolution
+  deliveries in order.
+- Webhook notifications are disabled unless both
+  `RID_NOTIFY_WEBHOOK_URL` and `RID_NOTIFY_WEBHOOK_SECRET` are configured;
+  invalid URL/signing configuration fails startup.
+- Repository/package metadata advanced to 0.6.0.
+
 ## 0.5.0 - 2026-11-15
 
 ### Added

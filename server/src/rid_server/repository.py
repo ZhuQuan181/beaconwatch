@@ -10,12 +10,21 @@ from datetime import datetime, timezone
 from typing import Sequence
 from uuid import uuid4
 
-from sqlalchemy import and_, case, or_, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from ulid import ULID
 
 from .alerts import Alert
-from .db import AlertEvent, AlertRecord, Drone, Observation, Station
+from .db import (
+    AlertEvent,
+    AlertRecord,
+    Drone,
+    NotificationOutbox,
+    Observation,
+    Station,
+)
+from .logging_setup import get_logger
 from .models import (
     AlertEventOut,
     AlertOut,
@@ -24,6 +33,8 @@ from .models import (
     Position,
 )
 from .models import Station as StationModel
+
+log = get_logger(__name__)
 
 
 class AlertStateConflict(Exception):
@@ -406,6 +417,58 @@ def _append_alert_event(
     )
 
 
+async def _enqueue_notification_safely(
+    session: AsyncSession,
+    row: AlertRecord,
+    *,
+    kind: str,
+    actor: str | None,
+    note: str | None,
+    occurred_at: datetime,
+    metadata: dict | None = None,
+) -> None:
+    """Append a webhook delivery without risking the alert transaction.
+
+    Normal operation commits both rows together.  The savepoint means a
+    missing pre-migration outbox table (or any enqueue-only failure) rolls
+    back just the notification, leaving the durable alert and its audit
+    transition intact.
+    """
+    delivery_id = str(ULID())
+    try:
+        payload = {
+            "schema": "beaconwatch.alert-notification.v1",
+            "delivery_id": delivery_id,
+            "event": kind,
+            "occurred_at": _iso(occurred_at),
+            "alert": alert_to_out(row).model_dump(mode="json"),
+            "actor": actor,
+            "note": note,
+            "metadata": metadata or {},
+        }
+        async with session.begin_nested():
+            session.add(
+                NotificationOutbox(
+                    delivery_id=delivery_id,
+                    alert_id=row.alert_id,
+                    kind=kind,
+                    payload=payload,
+                    status="pending",
+                    attempts=0,
+                    failures=0,
+                    next_attempt_at=datetime.now(tz=timezone.utc),
+                )
+            )
+            await session.flush()
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "notification.enqueue.failed",
+            alert_id=row.alert_id,
+            kind=kind,
+            error=str(exc)[:200],
+        )
+
+
 async def _alert_for_update(
     session: AsyncSession, alert_id: str
 ) -> AlertRecord | None:
@@ -422,6 +485,7 @@ async def upsert_alert(
     alert: Alert,
     *,
     now: datetime | None = None,
+    enqueue_notification: bool = False,
 ) -> AlertRecord:
     """Insert an alert, or record a later recurrence of the same alert id.
 
@@ -435,6 +499,7 @@ async def upsert_alert(
         alert.at, now or datetime.now(tz=timezone.utc)
     )
     existing = await _alert_for_update(session, alert.alert_id)
+    previous_status = existing.status if existing is not None else None
     previous_resolution_note = (
         existing.resolution_note if existing is not None else None
     )
@@ -567,6 +632,23 @@ async def upsert_alert(
                 "previous_resolution_note": previous_resolution_note,
             },
         )
+    if enqueue_notification:
+        kind = "alert.reopened" if auto_reopen else "alert.triggered"
+        await _enqueue_notification_safely(
+            session,
+            row,
+            kind=kind,
+            actor="system",
+            note=None,
+            occurred_at=observed_at,
+            metadata={
+                "recurrence": existing is not None,
+                "automatic": auto_reopen,
+                "previous_status": previous_status,
+                "trigger_count": row.trigger_count,
+                "reopen_count": row.reopen_count or 0,
+            },
+        )
     await session.commit()
     await session.refresh(row)
     return row
@@ -630,6 +712,38 @@ async def list_alert_events(
     return list(reversed(result.scalars().all()))
 
 
+async def notification_outbox_counts(
+    session: AsyncSession,
+) -> dict[str, int]:
+    """Return outbox state and cumulative attempt counters for metrics."""
+    counts = {
+        "pending": 0,
+        "delivering": 0,
+        "delivered": 0,
+        "dead": 0,
+        "attempts": 0,
+        "failures": 0,
+    }
+    status_rows = await session.execute(
+        select(NotificationOutbox.status, func.count()).group_by(
+            NotificationOutbox.status
+        )
+    )
+    for status, count in status_rows.all():
+        if status in counts:
+            counts[status] = int(count)
+    totals = await session.execute(
+        select(
+            func.coalesce(func.sum(NotificationOutbox.attempts), 0),
+            func.coalesce(func.sum(NotificationOutbox.failures), 0),
+        )
+    )
+    attempts, failures = totals.one()
+    counts["attempts"] = int(attempts or 0)
+    counts["failures"] = int(failures or 0)
+    return counts
+
+
 async def acknowledge_alert(
     session: AsyncSession,
     alert_id: str,
@@ -637,6 +751,7 @@ async def acknowledge_alert(
     acknowledged_by: str,
     note: str = "",
     now: datetime | None = None,
+    enqueue_notification: bool = False,
 ) -> AlertRecord | None:
     """Record the first acknowledgement for an alert.
 
@@ -656,6 +771,7 @@ async def acknowledge_alert(
         transition_at = _as_utc(transition_at)
         actor = acknowledged_by.strip()[:128]
         clean_note = note.strip()[:1000] or None
+        previous_status = row.status
         row.acknowledged_at = transition_at
         row.acknowledged_by = actor
         row.acknowledgement_note = clean_note
@@ -669,6 +785,16 @@ async def acknowledge_alert(
             note=clean_note,
             occurred_at=transition_at,
         )
+        if enqueue_notification:
+            await _enqueue_notification_safely(
+                session,
+                row,
+                kind="alert.acknowledged",
+                actor=actor,
+                note=clean_note,
+                occurred_at=transition_at,
+                metadata={"previous_status": previous_status},
+            )
         await session.commit()
         await session.refresh(row)
     return row
@@ -681,6 +807,7 @@ async def resolve_alert(
     resolved_by: str,
     note: str = "",
     now: datetime | None = None,
+    enqueue_notification: bool = False,
 ) -> AlertRecord | None:
     """Resolve an alert.  Repeating the same call is idempotent."""
     row = await _alert_for_update(session, alert_id)
@@ -692,6 +819,7 @@ async def resolve_alert(
     transition_at = _as_utc(now or datetime.now(tz=timezone.utc))
     actor = resolved_by.strip()[:128]
     clean_note = note.strip()[:1000] or None
+    previous_status = row.status
     row.resolved_at = transition_at
     row.resolved_by = actor
     row.resolution_note = clean_note
@@ -705,6 +833,16 @@ async def resolve_alert(
         note=clean_note,
         occurred_at=transition_at,
     )
+    if enqueue_notification:
+        await _enqueue_notification_safely(
+            session,
+            row,
+            kind="alert.resolved",
+            actor=actor,
+            note=clean_note,
+            occurred_at=transition_at,
+            metadata={"previous_status": previous_status},
+        )
     await session.commit()
     await session.refresh(row)
     return row
@@ -717,6 +855,7 @@ async def reopen_alert(
     reopened_by: str,
     note: str = "",
     now: datetime | None = None,
+    enqueue_notification: bool = False,
 ) -> AlertRecord | None:
     """Reopen a resolved alert and start a fresh acknowledgement cycle."""
     row = await _alert_for_update(session, alert_id)
@@ -728,6 +867,7 @@ async def reopen_alert(
     transition_at = _as_utc(now or datetime.now(tz=timezone.utc))
     actor = reopened_by.strip()[:128]
     clean_note = note.strip()[:1000] or None
+    previous_status = row.status
     previous_resolution_note = row.resolution_note
     row.status = "open"
     row.acknowledged_at = None
@@ -750,6 +890,20 @@ async def reopen_alert(
             "previous_resolution_note": previous_resolution_note,
         },
     )
+    if enqueue_notification:
+        await _enqueue_notification_safely(
+            session,
+            row,
+            kind="alert.reopened",
+            actor=actor,
+            note=clean_note,
+            occurred_at=transition_at,
+            metadata={
+                "automatic": False,
+                "previous_status": previous_status,
+                "reopen_count": row.reopen_count,
+            },
+        )
     await session.commit()
     await session.refresh(row)
     return row

@@ -120,5 +120,5 @@ def test_station_info_basic():
         name="Downtown Pier 1",
     )
     assert s.station_id == "edge-01"
-    assert s.firmware_version == "0.5.0"
+    assert s.firmware_version == "0.6.0"
     assert "ble" in s.capabilities

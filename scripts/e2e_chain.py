@@ -15,9 +15,14 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
+import json
 import sys
+import threading
 import uuid
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -35,6 +40,7 @@ from fixtures.odid_vectors import (  # noqa: E402
     SYSTEM,
     WIFI_BEACON_FRAME,
 )
+from pydantic import SecretStr  # noqa: E402
 from rid_edge.models import RidObservation  # noqa: E402
 from rid_edge.odid_parser import message_pack  # noqa: E402
 from rid_edge.pipeline import PipelineManager  # noqa: E402
@@ -44,8 +50,77 @@ from rid_server.alerts import AlertEngine, AlertRing  # noqa: E402
 from rid_server.bus import ObservationBus  # noqa: E402
 from rid_server.config import get_settings  # noqa: E402
 from rid_server.mqtt_subscriber import MqttSubscriber  # noqa: E402
+from rid_server.notifications import NotificationWorker  # noqa: E402
 from rid_server.settings_state import set_subscriber_bus_hook  # noqa: E402
 from scapy.layers.dot11 import RadioTap  # noqa: E402
+
+
+class _WebhookCapture:
+    """Small local HTTP receiver that verifies BeaconWatch HMAC headers."""
+
+    def __init__(self, secret: str) -> None:
+        self._secret = secret
+        self.deliveries: list[dict] = []
+        self.errors: list[str] = []
+        capture = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802
+                length = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(length)
+                timestamp = self.headers.get(
+                    "X-BeaconWatch-Timestamp", ""
+                )
+                signature = self.headers.get(
+                    "X-BeaconWatch-Signature", ""
+                )
+                expected = "sha256=" + hmac.new(
+                    capture._secret.encode(),
+                    f"{timestamp}.".encode() + body,
+                    hashlib.sha256,
+                ).hexdigest()
+                if not hmac.compare_digest(signature, expected):
+                    capture.errors.append("webhook signature mismatch")
+                try:
+                    payload = json.loads(body)
+                except ValueError:
+                    capture.errors.append("webhook body is not JSON")
+                    payload = {}
+                capture.deliveries.append(
+                    {
+                        "payload": payload,
+                        "delivery_header": self.headers.get(
+                            "X-BeaconWatch-Delivery", ""
+                        ),
+                        "event_header": self.headers.get(
+                            "X-BeaconWatch-Event", ""
+                        ),
+                    }
+                )
+                self.send_response(204)
+                self.end_headers()
+
+            def log_message(self, *_args) -> None:
+                return
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._thread = threading.Thread(
+            target=self._server.serve_forever,
+            daemon=True,
+        )
+
+    @property
+    def url(self) -> str:
+        host, port = self._server.server_address
+        return f"http://{host}:{port}/alerts"
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=2.0)
 
 
 def _official_beacon_frame() -> RawFrame:
@@ -101,18 +176,29 @@ async def main() -> int:
     topic_version = f"v2-{run}"
 
     base_settings = get_settings()
+    webhook_secret = f"e2e-webhook-secret-{run}"
+    webhook = _WebhookCapture(webhook_secret)
+    webhook.start()
     settings = base_settings.model_copy(
         update={
             "mqtt_client_id": f"rid-e2e-{run}",
             "mqtt_obs_topic": f"rid/{topic_version}/+/obs",
             "mqtt_info_topic": f"rid/{topic_version}/+/info",
+            "notify_webhook_url": webhook.url,
+            "notify_webhook_secret": SecretStr(webhook_secret),
+            "notify_webhook_timeout_s": 2.0,
+            "notify_worker_interval_s": 0.1,
+            "notify_batch_size": 20,
+            "notify_max_attempts": 3,
+            "notify_base_backoff_s": 0.1,
+            "notify_max_backoff_s": 1.0,
         }
     )
     topic = f"rid/{topic_version}/{station}/obs"
 
     identified, ghost = _build_observations(run, station)
     print(
-        f"[1/6] decoded official frames: identified={identified.drone_id} "
+        f"[1/7] decoded official frames: identified={identified.drone_id} "
         f"ghost={ghost.drone_id}"
     )
 
@@ -123,9 +209,17 @@ async def main() -> int:
     async def on_persisted(obs) -> None:
         received.append(obs.observation_id)
 
+    notifier = NotificationWorker(settings)
+    await notifier.start()
     subscriber = MqttSubscriber(settings)
     subscriber.alerts = AlertEngine(max_alt_m=None, unidentified=True)
-    set_subscriber_bus_hook(subscriber, ObservationBus(), AlertRing())
+    set_subscriber_bus_hook(
+        subscriber,
+        ObservationBus(),
+        AlertRing(),
+        settings=settings,
+        wake_notifications=notifier.wake,
+    )
     publish_persisted = subscriber.on_persisted
 
     async def collect_and_publish(obs) -> None:
@@ -140,7 +234,7 @@ async def main() -> int:
         port=settings.mqtt_port,
         identifier=f"rid-e2e-pub-{run}",
     ) as publisher:
-        print(f"[2/6] connected to MQTT {settings.mqtt_host}:{settings.mqtt_port}")
+        print(f"[2/7] connected to MQTT {settings.mqtt_host}:{settings.mqtt_port}")
 
         async def run_subscriber() -> None:
             try:
@@ -154,7 +248,7 @@ async def main() -> int:
         for obs in persisted:
             await publisher.publish(topic, obs.to_mqtt_payload(), qos=1)
             print(
-                f"[3/6] published {obs.observation_id[:16]}… "
+                f"[3/7] published {obs.observation_id[:16]}… "
                 f"protocol={obs.protocol.value}"
             )
 
@@ -169,12 +263,14 @@ async def main() -> int:
         except (asyncio.CancelledError, Exception):  # noqa: BLE001
             pass
 
-    print(f"[4/6] subscriber persisted {len(received)}/{len(persisted)}")
+    print(f"[4/7] subscriber persisted {len(received)}/{len(persisted)}")
     if errors:
         for error in errors:
             print(f"      FAIL: {error}")
     if len(received) < len(persisted):
         print("FAIL: messages did not reach the database")
+        await notifier.stop()
+        webhook.close()
         return 1
 
     import httpx
@@ -183,6 +279,7 @@ async def main() -> int:
     app = create_app()
     app.state.bus = None
     app.state.subscriber = subscriber
+    app.state.settings = settings
     transport = httpx.ASGITransport(app=app)
     headers: dict[str, str] = {}
     if base_settings.api_token is not None:
@@ -270,7 +367,21 @@ async def main() -> int:
             events_response.raise_for_status()
             alert_events = events_response.json()
 
-    print(f"[5/6] HTTP returned {len(rows)}/{len(persisted)} of our rows")
+    webhook_deliveries: list[dict] = []
+    if run_alerts:
+        selected_alert_id = run_alerts[0]["alert_id"]
+        for _ in range(80):
+            await asyncio.sleep(0.1)
+            webhook_deliveries = [
+                item
+                for item in webhook.deliveries
+                if item["payload"].get("alert", {}).get("alert_id")
+                == selected_alert_id
+            ]
+            if len(webhook_deliveries) >= 5 and notifier.delivered >= 5:
+                break
+
+    print(f"[5/7] HTTP returned {len(rows)}/{len(persisted)} of our rows")
     for row in rows:
         print(
             f"      {row['observation_id'][:16]}… drone={row['drone_id']} "
@@ -317,7 +428,7 @@ async def main() -> int:
             ok = False
         else:
             print(
-                f"[6/6] alert {alert['alert_id']} lifecycle "
+                f"[6/7] alert {alert['alert_id']} lifecycle "
                 f"ack -> resolve -> reopen -> resolve verified"
             )
             if acknowledged.get("acknowledged_by") != "e2e-operator":
@@ -343,9 +454,51 @@ async def main() -> int:
                 if action not in actions:
                     print(f"FAIL: audit trail is missing {action}")
                     ok = False
+            expected_events = [
+                "alert.triggered",
+                "alert.acknowledged",
+                "alert.resolved",
+                "alert.reopened",
+                "alert.resolved",
+            ]
+            observed_events = [
+                item["event_header"] for item in webhook_deliveries
+            ]
+            if webhook.errors:
+                print(f"FAIL: webhook verification: {webhook.errors[0]}")
+                ok = False
+            if observed_events != expected_events:
+                print(
+                    "FAIL: webhook event sequence was "
+                    f"{observed_events}, expected {expected_events}"
+                )
+                ok = False
+            delivery_ids = [
+                item["delivery_header"] for item in webhook_deliveries
+            ]
+            if len(set(delivery_ids)) != len(delivery_ids):
+                print("FAIL: webhook delivery IDs were not unique")
+                ok = False
+            for item in webhook_deliveries:
+                payload = item["payload"]
+                if item["delivery_header"] != payload.get("delivery_id"):
+                    print("FAIL: webhook delivery header/body mismatch")
+                    ok = False
+                if item["event_header"] != payload.get("event"):
+                    print("FAIL: webhook event header/body mismatch")
+                    ok = False
+            if ok:
+                print(
+                    f"[7/7] {len(webhook_deliveries)} signed webhook "
+                    "deliveries verified"
+                )
+
+    await notifier.stop()
+    webhook.close()
 
     print(
-        "PASS: official radio bytes -> MQTT -> DB -> HTTP -> alert lifecycle verified"
+        "PASS: official radio bytes -> MQTT -> DB -> HTTP -> alert "
+        "lifecycle -> signed webhook verified"
         if ok
         else "FAILED"
     )

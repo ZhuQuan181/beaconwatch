@@ -143,7 +143,8 @@ BeaconWatch 接收无人机广播的 Remote ID（ASTM F3411 / Open Drone ID）�
 4. 确保 drone 占位行存在，满足观察表外键；
 5. 插入 observation；只有真正插入的新行才更新 drone 汇总；
 6. 重复消息直接结束，不重复计数、告警或推送；
-7. 提交后执行告警规则，先 upsert 告警账本，再推送 WebSocket。
+7. 提交后执行告警规则，upsert 告警账本、审计事件和通知 outbox；
+8. 推送 WebSocket，并唤醒异步通知 worker。
 
 ### 站点心跳
 
@@ -172,6 +173,28 @@ BeaconWatch 接收无人机广播的 Remote ID（ASTM F3411 / Open Drone ID）�
 - 状态变更通过 WebSocket 广播，其他在线操作员无需刷新即可看到；
 - 告警落库失败会记录日志并降级为仅实时推送，不阻断观测入库；
 - 进程内 ring 只作为最近告警的轻量缓存，不再是数据源。
+
+### 告警通知
+
+- 配置 `RID_NOTIFY_WEBHOOK_URL` 与 `RID_NOTIFY_WEBHOOK_SECRET` 后启用；
+- 告警触发、确认、解决和重开会在同一数据库事务内写入
+  `notification_outbox`，不会出现“告警已提交但通知意图丢失”；
+- outbox 写入失败只回滚通知保存点，告警和审计仍会提交，并记录
+  `notification.enqueue.failed`；
+- 后台 worker 使用租约领取到期行，按 alert 保持串行、跨 alert 并发投递；
+- 同一 alert 只要还有更早的未完成通知，后续事件就不会被领取，避免重试时
+  `acknowledged`/`resolved` 越过尚未成功的 `triggered`；
+- `2xx` 视为成功；`408`、`425`、`429` 和 `5xx` 重试；其它 `4xx`/`3xx`
+  直接进入死信；网络错误和超时重试；
+- 重试使用有上限的指数退避和抖动，达到
+  `RID_NOTIFY_MAX_ATTEMPTS` 后状态变为 `dead`；
+- 投递为至少一次语义，`delivery_id` 在重试间保持不变，接收端必须按它
+  幂等去重；进程崩溃后租约到期即可继续投递；
+- 请求头包含 `X-BeaconWatch-Event`、`X-BeaconWatch-Delivery`、
+  `X-BeaconWatch-Timestamp`、`X-BeaconWatch-Signature` 和尝试次数；
+- 签名算法为
+  `HMAC-SHA256(secret, timestamp + "." + raw_request_body)`，输出
+  `sha256=<hex>`。接收端应校验时间窗并拒绝重放。
 
 ### HTTP / WebSocket
 
@@ -228,6 +251,8 @@ WebSocket 推送以下 frame：
 - `alerts` 表保存当前状态、触发次数、首次/最近触发时间、确认与解决字段，
   并按状态/触发时间、无人机/触发时间和确认时间建立索引；
 - `alert_events` 表以追加方式保存触发、确认、解决和重开事件，不覆盖历史；
+- `notification_outbox` 保存待投递 payload、尝试/失败次数、下次尝试时间、
+  租约、死信原因和投递时间；状态与下次尝试时间建组合索引；
 - Alembic 在容器启动时自动执行 `upgrade head`。
 
 ## 9. 运维接口
@@ -235,7 +260,8 @@ WebSocket 推送以下 frame：
 - `/health/live`：进程存活，不访问数据库；
 - `/health/ready`：执行 `SELECT 1`，数据库不可用返回 503；
 - `/metrics`：MQTT 连接、接收/入库/重复/非法消息、重连、站点心跳、WS
-  客户端/丢弃帧、HTTP 请求/耗时/状态码/鉴权失败和进程 uptime。
+  客户端/丢弃帧、HTTP 请求/耗时/状态码/鉴权失败、通知 outbox 各状态/
+  尝试/失败计数和 worker 状态。
 
 ## 10. 安全现状与生产限制
 
@@ -248,7 +274,7 @@ TLS；Compose 默认仍是开发凭据和明文 MQTT。在公网或不可信网�
 3. MQTT ACL、每站客户端证书/账号和 Broker 侧 TLS 配置；
 4. 密钥管理、数据库最小权限、非默认密码；
 5. 多副本时用 Redis/NATS 等共享总线替代进程内 `ObservationBus`；
-6. 告警关闭/重新打开、通知集成和保留期限策略。
+6. 告警游标分页、统计接口、保留期限与清理任务。
 
 这些是部署前置条件，不是仓库当前已经实现的功能。
 
@@ -267,6 +293,6 @@ docs/       架构、部署、测试文档
 
 1. RBAC/审计、MQTT ACL、密钥轮换与生产 TLS 渗透测试；
 2. 多站定位/时差融合与轨迹质量评分；
-3. 告警关闭/重开、通知渠道和保留期限策略；
+3. 告警分页/统计、保留期限与清理任务；
 4. 多副本共享 WebSocket 总线；
 5. 真实无人机/抓包回放集与现场验收基线。

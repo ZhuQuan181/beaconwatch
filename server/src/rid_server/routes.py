@@ -183,7 +183,18 @@ async def _broadcast_alert_update(request: Request, row) -> AlertOut:
             await bus.publish_alert(payload)
         except Exception as exc:  # noqa: BLE001
             log.warning("alert.broadcast.failed", error=str(exc)[:200])
+    notifier = getattr(request.app.state, "notifier", None)
+    if notifier is not None:
+        try:
+            notifier.wake()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("notification.wake.failed", error=str(exc)[:200])
     return result
+
+
+def _notifications_enabled(request: Request) -> bool:
+    settings = getattr(request.app.state, "settings", None)
+    return bool(settings and settings.notifications_enabled)
 
 
 @router.get("/alerts", response_model=list[AlertOut])
@@ -264,6 +275,7 @@ async def acknowledge_alert_route(
             alert_id,
             acknowledged_by=body.acknowledged_by,
             note=body.note,
+            enqueue_notification=_notifications_enabled(request),
         )
     except AlertStateConflict as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
@@ -285,6 +297,7 @@ async def resolve_alert_route(
         alert_id,
         resolved_by=body.resolved_by,
         note=body.note,
+        enqueue_notification=_notifications_enabled(request),
     )
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="alert not found")
@@ -305,6 +318,7 @@ async def reopen_alert_route(
             alert_id,
             reopened_by=body.reopened_by,
             note=body.note,
+            enqueue_notification=_notifications_enabled(request),
         )
     except AlertStateConflict as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc

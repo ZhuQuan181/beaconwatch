@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from urllib.parse import urlparse
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -71,9 +72,51 @@ class Settings(BaseSettings):
     # panel is unusable within a minute.
     alert_dedup_seconds: float = 120.0
 
+    # ── Alert notification webhook ──────────────────────────────────
+    # Empty URL disables notification enqueueing and the worker.  When a
+    # URL is set, a signing secret is mandatory and deliveries use the
+    # stable ``delivery_id`` as their idempotency key.
+    notify_webhook_url: str = ""
+    notify_webhook_secret: SecretStr | None = None
+    notify_webhook_timeout_s: float = Field(default=10.0, ge=0.5, le=60.0)
+    # Direct egress is the safe default: a globally exported proxy can
+    # otherwise turn an internal webhook into a proxy-routed request.
+    notify_webhook_trust_env: bool = False
+    notify_worker_interval_s: float = Field(default=1.0, ge=0.1, le=60.0)
+    notify_batch_size: int = Field(default=20, ge=1, le=100)
+    notify_concurrency: int = Field(default=4, ge=1, le=32)
+    notify_max_attempts: int = Field(default=8, ge=1, le=50)
+    notify_base_backoff_s: float = Field(default=2.0, ge=0.1, le=60.0)
+    notify_max_backoff_s: float = Field(default=300.0, ge=1.0, le=3600.0)
+
     # ── Operational ────────────────────────────────────────────────
     log_level: str = "INFO"
     env: str = "dev"
+
+    @model_validator(mode="after")
+    def validate_notification_config(self) -> Settings:
+        """Fail fast on a webhook that cannot be safely delivered."""
+        if not self.notify_webhook_url:
+            return self
+        parsed = urlparse(self.notify_webhook_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError(
+                "RID_NOTIFY_WEBHOOK_URL must be an absolute http(s) URL"
+            )
+        if (
+            self.notify_webhook_secret is None
+            or not self.notify_webhook_secret.get_secret_value()
+        ):
+            raise ValueError(
+                "RID_NOTIFY_WEBHOOK_SECRET is required when "
+                "RID_NOTIFY_WEBHOOK_URL is set"
+            )
+        if self.notify_max_backoff_s < self.notify_base_backoff_s:
+            raise ValueError(
+                "RID_NOTIFY_MAX_BACKOFF_S must be >= "
+                "RID_NOTIFY_BASE_BACKOFF_S"
+            )
+        return self
 
     @property
     def database_url(self) -> str:
@@ -86,6 +129,10 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    @property
+    def notifications_enabled(self) -> bool:
+        return bool(self.notify_webhook_url)
 
 
 @lru_cache(maxsize=1)

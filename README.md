@@ -38,6 +38,10 @@ run the real edge/MQTT/database/API stack.
 - **Alert workflow:** durable open/acknowledged/resolved state machine,
   automatic recurrence reopening, operator resolution and reopen actions,
   immutable audit events, status/rule/drone filters and live WebSocket updates.
+- **Durable notifications:** alert lifecycle transitions are written to a
+  transactional outbox and delivered by a background worker as HMAC-SHA256
+  signed webhooks, with leases, bounded exponential backoff, dead-lettering
+  and `delivery_id` idempotency for at-least-once delivery.
 - **Dashboard:** heartbeat-monitored live WebSocket feed, timeout/retry-aware
   HTTP client, replay timeline, stations and coverage, geofences, alerts,
   unidentified-drone highlighting.
@@ -76,6 +80,11 @@ dashboard with the same value in `VITE_API_TOKEN`. The build-time token is
 embedded in the browser bundle, so use an HTTPS reverse proxy (or an
 identity-aware gateway) rather than publishing that bundle to untrusted users.
 
+To enable alert webhooks, set both `RID_NOTIFY_WEBHOOK_URL` and
+`RID_NOTIFY_WEBHOOK_SECRET`. The receiver must verify the
+`X-BeaconWatch-Signature` header and de-duplicate on `X-BeaconWatch-Delivery`;
+see `docs/02-deployment.md` for the signing contract.
+
 ## Testing
 
 ```bash
@@ -100,8 +109,8 @@ untrusted network you still need:
 - HTTPS/WSS termination at a reverse proxy;
 - secret management and non-default database credentials;
 - a shared WebSocket fan-out layer if running multiple server replicas;
-- notification delivery, alert retention policy and full role-based access
-  control beyond the alert audit trail.
+- alert pagination/retention policy and full role-based access control beyond
+  the alert audit trail.
 
 The current WebSocket fan-out is in-process, so a multi-replica server requires
 a shared bus such as Redis/NATS. See `docs/01-architecture.md` and

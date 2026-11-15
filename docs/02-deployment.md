@@ -91,6 +91,62 @@ curl -s -H "Authorization: Bearer $RID_API_TOKEN" \
 和 `to` 过滤。首次确认和解决均写入操作员、时间与备注；重复确认或解决返回
 同一记录。只有已解决告警可以重新打开，每次状态变化都会进入审计时间线。
 
+### 可选告警 Webhook
+
+同时设置 URL 和签名密钥后启用持久化通知；只设置 URL 会在启动时直接报错，
+因为未签名的通知不应被当作生产配置：
+
+```bash
+export RID_NOTIFY_WEBHOOK_URL="https://ops.example.com/hooks/beaconwatch"
+export RID_NOTIFY_WEBHOOK_SECRET="$(openssl rand -hex 32)"
+export RID_NOTIFY_WEBHOOK_TIMEOUT_S=10
+export RID_NOTIFY_MAX_ATTEMPTS=8
+export RID_NOTIFY_BASE_BACKOFF_S=2
+export RID_NOTIFY_MAX_BACKOFF_S=300
+```
+
+通知客户端默认不读取 `HTTP(S)_PROXY`/`ALL_PROXY`，避免全局代理把内部 Webhook
+转到非预期路径。若生产出口必须经过 HTTP(S) 代理，显式设置
+`RID_NOTIFY_WEBHOOK_TRUST_ENV=true`，并确认代理允许该目标。
+
+支持的事件为 `alert.triggered`、`alert.acknowledged`、`alert.resolved` 和
+`alert.reopened`。告警状态变更与 outbox 行在同一事务内提交；通知失败不会
+阻断观测入库或告警 UI。投递为至少一次，重试不会改变 `delivery_id`，接收端
+必须用它做幂等去重。
+
+接收端验证示例：
+
+```python
+import hashlib
+import hmac
+import json
+import time
+
+timestamp = request.headers["X-BeaconWatch-Timestamp"]
+body = await request.body()
+expected = "sha256=" + hmac.new(
+    SECRET.encode(),
+    f"{timestamp}.".encode() + body,
+    hashlib.sha256,
+).hexdigest()
+if abs(time.time() - int(timestamp)) > 300:
+    raise HTTPException(401, "stale webhook")
+if not hmac.compare_digest(
+    request.headers["X-BeaconWatch-Signature"], expected
+):
+    raise HTTPException(401, "invalid signature")
+
+delivery_id = request.headers["X-BeaconWatch-Delivery"]
+if not store.remember_once(delivery_id):
+    return Response(status_code=204)
+enqueue_for_operator(json.loads(body))
+return Response(status_code=204)
+```
+
+验签使用原始请求字节，不要重新序列化 JSON。`2xx` 表示成功；`408`、`425`、
+`429` 和 `5xx` 会重试；其它 `4xx`/`3xx` 视为永久失败并进入死信。慢处理应
+先返回 `2xx` 再异步执行，避免超过通知超时。
+
 ## 3. 边缘节点
 
 ```bash
@@ -164,14 +220,15 @@ make e2e
 
 脚本读取官方 OpenDroneID encoder 生成的 Beacon/Message Pack，经过真实
 receiver、pipeline、EMQX、数据库和 FastAPI，最后通过 HTTP 检查协议、RSSI、
-速度、操作员位置与未识别无人机列表。
+速度、操作员位置、告警生命周期，并用本地签名接收端验证触发、确认、解决和
+重开通知的 HMAC 与投递顺序。
 
 ## 6. 数据库升级与备份
 
 升级镜像：
 
 ```bash
-docker build -t beaconwatch-server:0.5.0 ./server
+docker build -t beaconwatch-server:0.6.0 ./server
 docker compose -f server/docker-compose.yml up -d --build rid-server
 ```
 
@@ -200,7 +257,7 @@ cat beaconwatch-YYYYMMDD-HHMMSS.dump | \
 - [ ] 限制 5433/1883/18083/8000 的暴露范围；
 - [ ] 为多副本部署引入共享 WebSocket 总线；
 - [ ] 配置数据库备份、恢复演练和磁盘容量告警；
-- [ ] 制定告警保留期限、通知渠道和关闭/重开策略；
+- [ ] 启用并验证 Webhook 签名、重试/死信监控、告警保留期限和清理策略；
 - [ ] 用真实抓包集和现场无人机完成验收测试。
 
 ## 8. 故障排查
@@ -215,3 +272,5 @@ docker compose -f server/docker-compose.yml logs --tail=200 timescaledb
 - `rid_mqtt_reconnects_total` 持续增长：检查 broker 地址、网络和 MQTT 凭据；
 - 边缘端有流量但数据库无新行：检查 topic 年月版本、站点 ID 和 outbox 日志；
 - 地图有列表但无位置：检查观测是否只有 Basic ID、尚无 Location 消息。
+- `rid_notification_outbox_dead` 增长：检查 Webhook 认证、URL 和返回码；
+  `pending`/`failures` 持续增长时检查网络、接收端耗时和 `last_error` 日志。

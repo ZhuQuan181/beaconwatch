@@ -16,7 +16,12 @@ from .db import dispose_engine, get_session_factory
 from .logging_setup import configure_logging, get_logger
 from .metrics import RequestMetrics
 from .mqtt_subscriber import MqttSubscriber
-from .repository import alert_to_out, list_alerts
+from .notifications import NotificationWorker
+from .repository import (
+    alert_to_out,
+    list_alerts,
+    notification_outbox_counts,
+)
 from .routes import router, ws_router
 from .security import RequestContextMiddleware, require_api_token
 from .settings_state import set_subscriber_bus_hook
@@ -37,6 +42,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     subscriber = MqttSubscriber(settings)
     app.state.subscriber = subscriber
+    notifier = (
+        NotificationWorker(settings)
+        if settings.notifications_enabled
+        else None
+    )
+    app.state.notifier = notifier
+    if notifier is not None:
+        await notifier.start()
     # Rules run after each committed observation.  Constructing the
     # engine here (not per message) keeps dedup state across messages —
     # a hovering drone would otherwise re-alert at 4 Hz.
@@ -65,13 +78,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     subscriber.alerts = engine
     # Wire the bus into the subscriber so persisted observations
     # fan out to WebSocket clients in real time.
-    set_subscriber_bus_hook(subscriber, bus, app.state.alerts)
+    set_subscriber_bus_hook(
+        subscriber,
+        bus,
+        app.state.alerts,
+        settings=settings,
+        wake_notifications=notifier.wake if notifier is not None else None,
+    )
     await subscriber.start()
     try:
         yield
     finally:
         log.info("shutdown.begin")
         await subscriber.stop()
+        if notifier is not None:
+            await notifier.stop()
         await dispose_engine()
         log.info("shutdown.done")
 
@@ -81,7 +102,7 @@ def create_app() -> FastAPI:
     request_metrics = RequestMetrics()
     app = FastAPI(
         title="RID Server",
-        version="0.5.0",
+        version="0.6.0",
         lifespan=lifespan,
     )
     app.state.settings = settings
@@ -130,6 +151,7 @@ def create_app() -> FastAPI:
     async def get_metrics(request: Request) -> Response:
         subscriber = getattr(request.app.state, "subscriber", None)
         bus = getattr(request.app.state, "bus", None)
+        notifier = getattr(request.app.state, "notifier", None)
         values = {
             "rid_mqtt_connected": int(bool(getattr(subscriber, "connected", False))),
             "rid_mqtt_received_total": int(getattr(subscriber, "received", 0)),
@@ -145,7 +167,44 @@ def create_app() -> FastAPI:
             "rid_ws_delivered_frames_total": int(
                 getattr(bus, "delivered_frames", 0)
             ),
+            "rid_notification_worker_running": int(
+                bool(getattr(notifier, "running", False))
+            ),
+            "rid_notification_last_success_timestamp_seconds": (
+                notifier.last_success_at.timestamp()
+                if getattr(notifier, "last_success_at", None) is not None
+                else 0.0
+            ),
         }
+        try:
+            factory = get_session_factory()
+            async with factory() as session:
+                outbox = await notification_outbox_counts(session)
+        except Exception:  # noqa: BLE001
+            outbox = {
+                "pending": 0,
+                "delivering": 0,
+                "delivered": 0,
+                "dead": 0,
+                "attempts": 0,
+                "failures": 0,
+            }
+        values.update(
+            {
+                "rid_notification_outbox_pending": outbox["pending"],
+                "rid_notification_outbox_delivering": outbox[
+                    "delivering"
+                ],
+                "rid_notification_outbox_delivered": outbox["delivered"],
+                "rid_notification_outbox_dead": outbox["dead"],
+                "rid_notification_outbox_attempts_total": outbox[
+                    "attempts"
+                ],
+                "rid_notification_outbox_failures_total": outbox[
+                    "failures"
+                ],
+            }
+        )
         lines = [f"{name} {value}" for name, value in values.items()]
         lines.extend(request.app.state.metrics.render())
         body = "\n".join(lines) + "\n"

@@ -202,6 +202,84 @@ class AlertEvent(Base):
     )
 
 
+class NotificationOutbox(Base):
+    """Durable webhook delivery queue for alert lifecycle events.
+
+    The row is written in the same transaction as the alert transition.
+    A separate worker claims due rows with a lease, posts them to the
+    configured webhook and records the result.  A crash after a successful
+    HTTP response can therefore produce a duplicate, never a lost event;
+    receivers should de-duplicate on ``delivery_id``.
+    """
+
+    __tablename__ = "notification_outbox"
+
+    delivery_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    alert_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("alerts.alert_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload: Mapped[dict] = mapped_column(
+        JSONB().with_variant(JSON(), "sqlite"),
+        nullable=False,
+        default=dict,
+    )
+    status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="pending",
+        server_default="pending",
+    )
+    attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    failures: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    lease_id: Mapped[str | None] = mapped_column(String(64))
+    lease_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    last_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    delivered_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'delivering', 'delivered', 'dead')",
+            name="ck_notification_outbox_status",
+        ),
+        Index(
+            "ix_notification_outbox_status_next_attempt",
+            "status",
+            "next_attempt_at",
+        ),
+        Index(
+            "ix_notification_outbox_alert_created",
+            "alert_id",
+            "created_at",
+        ),
+        Index("ix_notification_outbox_created_at", "created_at"),
+    )
+
+
 class Drone(Base):
     __tablename__ = "drones"
 

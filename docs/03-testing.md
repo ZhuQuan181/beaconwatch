@@ -46,6 +46,9 @@ PYTHONPATH=server/src .venv/bin/python -m pytest -q server/tests
 - 已解决告警再次触发时自动重开、重开计数和系统审计事件；
 - 告警状态/规则/无人机/时间窗口筛选、事件时间线；
 - 告警落库失败时仍下发实时告警；
+- 通知 outbox 与告警状态原子写入、幂等生命周期事件、通知写入失败隔离；
+- Webhook HMAC 签名、2xx/4xx/5xx/超时、退避重试、最大尝试和死信；
+- 投递租约恢复、活跃租约防重复领取、outbox 指标；
 - health/readiness/metrics；
 - MQTT TLS 上下文与证书配对校验；
 - 操作员位置、精度、RSSI 在 DB 和 HTTP 之间的保真。
@@ -69,7 +72,10 @@ make e2e
 前置是 `make up`。脚本使用真实 EMQX、TimescaleDB、MqttSubscriber、repository
 和 FastAPI 路由，验证官方帧最终能通过 HTTP 查询，并确认未识别告警已落库、
 首次确认审计字段可读且重复确认不会覆盖原记录。脚本继续执行解决、重新打开
-和再次解决，并验证完整审计事件序列可从真实 PostgreSQL 读回。
+和再次解决，并验证完整审计事件序列可从真实 PostgreSQL 读回。它还会启动
+一个本地签名 Webhook 接收端，验证 `alert.triggered`、`acknowledged`、
+`resolved`、`reopened`、最终 `resolved` 的 HMAC、事件顺序和唯一
+`delivery_id`。
 
 ### 前端
 
@@ -89,13 +95,14 @@ npm run build
 CI 会构建服务端镜像并校验 Compose 配置。发布前人工验证应使用独立 Compose
 project、独立端口和独立数据卷，不要对现有生产卷执行 `down -v`。预期结果：
 
-1. 空库启动时自动执行全部 Alembic 迁移；
+1. 空库启动时自动执行全部 Alembic 迁移（当前到 `0007`）；
 2. `/health/ready` 返回 200；
 3. `/metrics` 显示 MQTT 已连接；
 4. 测试容器和测试卷可以独立删除。
 
-升级发布还需用独立的 0.4 schema 数据库验证 `0005 → 0006`：原有确认状态
-应回填为 `acknowledged`，并为旧告警生成触发/确认审计事件。
+升级发布还需验证上一版的 schema 升级：已有告警、审计事件和确认状态必须
+保留，`notification_outbox` 应新增且为待投递状态；旧进程重启后应继续处理
+到期通知。
 
 ## 3. 官方 golden vectors
 
