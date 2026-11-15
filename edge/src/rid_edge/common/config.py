@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     station_lat: float = Field(default=0.0, ge=-90, le=90)
     station_lon: float = Field(default=0.0, ge=-180, le=180)
     station_alt_m: float = Field(default=0.0, ge=-1000, le=100000)
-    firmware_version: str = Field(default="0.9.0", max_length=32)
+    firmware_version: str = Field(default="1.0.0", max_length=32)
 
     # ---- Wi-Fi receiver ----
     wifi_enabled: bool = Field(default=True)

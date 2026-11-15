@@ -304,6 +304,8 @@ WebSocket 推送以下 frame：
 - 告警面板读取服务端聚合统计，并在需要时通过游标加载更早的持久化告警；
 - 地图弹窗使用 DOM `textContent`/`setDOMContent`，不把无人机字段拼进 HTML；
 - MapLibre 独立分包，主 bundle 不包含地图引擎。
+- 生产代理可在运行时生成 viewer key 的 `config.js`，构建产物不包含 key；
+  浏览器仍可读取该 viewer key，因此只能授予只读权限。
 
 ## 8. 数据库
 
@@ -331,9 +333,13 @@ WebSocket 推送以下 frame：
 - `/health/ready`：执行 `SELECT 1`，数据库不可用返回 503；配置 Redis 总线
   且 `RID_REDIS_REQUIRED=true` 时，Redis 未连接也会返回 503；
 - `/metrics`：MQTT 连接、接收/入库/重复/非法消息、重连、站点心跳、WS
-  客户端/丢弃帧、HTTP 请求/耗时/状态码/鉴权失败、通知 outbox 各状态/
-  尝试/失败计数、Redis 总线连接/重连/发布失败/远端 frame 计数、worker
-  状态，以及保留任务删除数/失败数/最近成功时间。
+  客户端/连接/拒绝/非法 frame/丢弃帧、HTTP 请求/延迟 histogram/状态码/
+  鉴权失败、数据库可用性、ingest 延迟 histogram、通知 outbox 各状态/
+  尝试/失败/投递延迟 histogram、Redis 总线连接/重连/发布失败/远端 frame
+  计数、worker 状态，以及保留任务删除数/失败数/最近成功时间。
+
+生产参考拓扑、Prometheus 告警规则、容量测试和故障演练见
+`deploy/production/` 与 `04-operations.md`。
 
 ## 10. 安全现状与生产限制
 

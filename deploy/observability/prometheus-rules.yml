@@ -1,0 +1,197 @@
+groups:
+  - name: beaconwatch-availability
+    rules:
+      - alert: BeaconWatchTargetDown
+        expr: up{job="beaconwatch-api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: BeaconWatch API target is not scrapeable
+          description: >-
+            Prometheus has failed to scrape {{ $labels.instance }} for
+            more than two minutes.
+
+      - alert: BeaconWatchDatabaseUnavailable
+        expr: rid_database_up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: BeaconWatch cannot query its database
+          description: >-
+            /metrics reports rid_database_up=0 on
+            {{ $labels.instance }}.
+
+      - alert: BeaconWatchMqttDisconnected
+        expr: rid_mqtt_connected == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: BeaconWatch MQTT ingest is disconnected
+          description: >-
+            The API replica {{ $labels.instance }} has no MQTT session.
+
+      - alert: BeaconWatchRedisBusDisconnected
+        expr: >-
+          rid_bus_backend_redis == 1
+          and on(instance)
+          rid_bus_redis_connected == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Redis live fan-out is degraded
+          description: >-
+            Redis-backed fan-out is selected but the shared bus is
+            disconnected on {{ $labels.instance }}.
+
+  - name: beaconwatch-latency-and-errors
+    rules:
+      - alert: BeaconWatchHighHttp5xxRate
+        expr: >-
+          (
+            sum(rate(rid_http_responses_total{status=~"5.."}[5m]))
+            /
+            clamp_min(sum(rate(rid_http_requests_total[5m])), 0.001)
+          ) > 0.02
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: BeaconWatch API 5xx rate is above 2%
+          description: The five-minute 5xx ratio is {{ $value | humanizePercentage }}.
+
+      - alert: BeaconWatchHighApiLatency
+        expr: >-
+          histogram_quantile(
+            0.95,
+            sum by (le) (
+              rate(rid_http_request_duration_seconds_bucket[5m])
+            )
+          ) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: BeaconWatch API p95 exceeds one second
+          description: The five-minute p95 is {{ $value | humanizeDuration }}.
+
+      - alert: BeaconWatchHighIngestLatency
+        expr: >-
+          histogram_quantile(
+            0.95,
+            sum by (le) (
+              rate(rid_observation_ingest_latency_seconds_bucket[10m])
+            )
+          ) > 5
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Remote ID ingest p95 exceeds five seconds
+          description: >-
+            Edge received_at to committed ingest p95 is
+            {{ $value | humanizeDuration }}.
+
+      - alert: BeaconWatchMqttReconnectStorm
+        expr: increase(rid_mqtt_reconnects_total[10m]) > 3
+        labels:
+          severity: warning
+        annotations:
+          summary: BeaconWatch MQTT reconnect storm
+          description: >-
+            {{ $labels.instance }} reconnected more than three times
+            in ten minutes.
+
+      - alert: BeaconWatchRedisPublishFailures
+        expr: increase(rid_bus_redis_publish_failures_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Redis live-bus publishes are failing
+          description: >-
+            The local replica is falling back while remote WebSocket
+            clients may be missing live frames.
+
+      - alert: BeaconWatchWebSocketDrops
+        expr: increase(rid_ws_dropped_frames_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: BeaconWatch is dropping slow WebSocket frames
+          description: >-
+            At least one subscriber queue overflowed during the last
+            five minutes.
+
+      - alert: BeaconWatchHighWebSocketRejectionRate
+        expr: increase(rid_ws_rejected_total[5m]) > 20
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Many WebSocket handshakes are being rejected
+          description: Check key rotation, proxy headers and client configuration.
+
+  - name: beaconwatch-notifications-and-retention
+    rules:
+      - alert: BeaconWatchNotificationWorkerStopped
+        expr: >-
+          rid_notification_enabled == 1
+          and on(instance)
+          rid_notification_worker_running == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: A configured notification worker is not running
+          description: >-
+            Check notification configuration and worker logs on
+            {{ $labels.instance }}.
+
+      - alert: BeaconWatchNotificationBacklog
+        expr: rid_notification_outbox_pending > 100
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Alert webhook backlog is growing
+          description: >-
+            {{ $value }} notifications are pending; check receiver latency
+            and retry/backoff settings.
+
+      - alert: BeaconWatchNotificationDeadLetters
+        expr: rid_notification_outbox_dead > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Alert webhooks have dead-lettered deliveries
+          description: Inspect outbox last_error rows and the receiver endpoint.
+
+      - alert: BeaconWatchHighNotificationLatency
+        expr: >-
+          histogram_quantile(
+            0.95,
+            sum by (le) (
+              rate(rid_notification_delivery_lag_seconds_bucket[15m])
+            )
+          ) > 60
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Notification delivery p95 exceeds one minute
+          description: Current p95 is {{ $value | humanizeDuration }}.
+
+      - alert: BeaconWatchRetentionFailures
+        expr: increase(rid_retention_failures_total[1h]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: BeaconWatch retention cleanup is failing
+          description: Inspect retention worker logs and database health.

@@ -45,6 +45,10 @@ make reset
 
 开发/演示的默认数据库凭据写在 Compose 中，生产环境必须替换。
 
+完整生产参考拓扑见 `deploy/production/`，包括 TLS 代理、多 API 副本、
+内部网络、一次性迁移任务、Docker secrets 和运行时 viewer key；运行与
+故障处理见 `04-operations.md`。
+
 ### 多副本与 MQTT 共享订阅
 
 默认 Compose 为了本地访问固定了容器名和宿主机 8000 端口，只启动一个 API
@@ -133,6 +137,20 @@ services:
 凭据。key 必须由至少 32 字节随机数生成，不能使用人工密码；通用密码认证
 应交给 OIDC/反向代理。
 
+数据库、Redis、MQTT、旧版 token 和 Webhook 签名密钥支持 `*_FILE`：
+
+```bash
+export RID_DB_PASSWORD_FILE=/run/secrets/db_password
+export RID_REDIS_URL_FILE=/run/secrets/redis_url
+export RID_MQTT_PASSWORD_FILE=/run/secrets/mqtt_password
+export RID_API_TOKEN_FILE=/run/secrets/legacy_admin_token
+export RID_NOTIFY_WEBHOOK_SECRET_FILE=/run/secrets/webhook_secret
+```
+
+对应文件最多 64 KiB，缺失/为空/不可读会使进程启动失败；配置了 `*_FILE`
+时文件值优先于内联值或开发默认值。数据库 URL 会对用户名、密码和库名做
+百分号编码，生成密码中的特殊字符不会破坏 DSN。
+
 浏览器 WebSocket 不能自定义 Authorization 头，因此前端通过
 `Sec-WebSocket-Protocol: bearer.<key>` 传递凭据。前端构建时注入一个
 key（Vite 变量会进入 JS bundle，公开展示屏应使用 viewer key）：
@@ -141,6 +159,11 @@ key（Vite 变量会进入 JS bundle，公开展示屏应使用 viewer key）：
 cd frontend
 VITE_API_TOKEN="$VIEWER_KEY" npm run build
 ```
+
+生产代理镜像不把 key 打进构建层，而是在容器启动时从
+`/run/secrets/viewer_api_token` 生成 `/config.js`。前端优先读取该运行时
+配置，其次才使用 `VITE_API_TOKEN`。key 仍可被浏览器读取，因此只能是
+最小权限 viewer key；轮换后重启代理并刷新页面。
 
 ```bash
 curl -s -H "Authorization: Bearer $OPERATOR_KEY" \
@@ -305,8 +328,15 @@ curl -s http://localhost:8000/metrics
 - `ready` 会执行数据库 `SELECT 1`；启用
   `RID_REDIS_REQUIRED=true` 时还会检查 Redis 总线连接；
 - Compose healthcheck 使用 `ready`；
-- 指标是 Prometheus text 格式，但仓库未附带 Prometheus/Grafana 配置。
+- 指标是 Prometheus text 格式；仓库附带告警规则
+  `deploy/observability/prometheus-rules.yml`，不附带 Grafana 面板。
 - 每个 HTTP 响应带 `X-Request-ID`，并记录请求数、耗时、状态码和鉴权失败数；
+- `rid_http_request_duration_seconds` 是带 method/route 标签的标准
+  histogram；`rid_observation_ingest_latency_seconds` 和
+  `rid_notification_delivery_lag_seconds` 分别衡量入库和通知延迟；
+- `rid_database_up`、`rid_ws_connections_total`、
+  `rid_ws_disconnections_total`、`rid_ws_rejected_total` 和
+  `rid_ws_malformed_messages_total` 用于数据库和 WebSocket 运行状态；
 - `/observations` 达到一页上限时返回 `X-Next-Cursor`，也可使用
   `/observations/page` 获取 `{items, next_cursor}`；不要再用深 offset 翻页。
 - `/alerts` 达到一页上限时返回 `X-Next-Cursor`，也可使用
@@ -345,12 +375,23 @@ EMQX、PostgreSQL 和 Redis channel，验证 shared subscription 只消费一次
 Redis 将 frame 广播给两个副本的 WebSocket 客户端、数据库产生唯一告警记录和
 唯一触发审计，并在结束后清理测试行。
 
+容量与故障恢复使用独立脚本：
+
+```bash
+make load-test LOAD_TEST_ARGS='--duration 30 --ingest-rate 20 --ws-clients 2'
+make e2e-resilience
+```
+
+`load-test` 必须指向一次性或受控环境；`e2e-resilience` 使用独立
+`bwresilience` 项目、端口和卷，依次停启 Redis、EMQX、数据库和 API。
+具体判据、SLO 和清理方式见 `04-operations.md`。
+
 ## 6. 数据库升级与备份
 
 升级镜像：
 
 ```bash
-docker build -t beaconwatch-server:0.9.0 ./server
+docker build -t beaconwatch-server:1.0.0 ./server
 docker compose -f server/docker-compose.yml up -d --build rid-server
 ```
 
@@ -373,6 +414,7 @@ cat beaconwatch-YYYYMMDD-HHMMSS.dump | \
 ## 7. 生产部署检查表
 
 - [ ] 替换数据库默认密码，使用 secret manager；
+- [ ] 使用 `*_FILE` 挂载数据库/Redis/MQTT/Webhook 密钥，验证缺失时启动失败；
 - [ ] 使用 `RID_AUTH_USERS_FILE` 配置具名、最小权限的 API key，并演练轮换；
 - [ ] 使用 HTTPS/WSS 反向代理；
 - [ ] 为 MQTT 配置 TLS（`RID_MQTT_CA_CERT` 等）、独立站点账号和 ACL；

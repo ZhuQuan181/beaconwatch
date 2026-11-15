@@ -54,6 +54,12 @@ run the real edge/MQTT/database/API stack.
   duplicate ingest, Redis Pub/Sub fans live frames to every API replica, and
   PostgreSQL-backed alert deduplication prevents duplicate alerts and
   notifications across workers.
+- **Production reference:** `deploy/production/` adds a TLS/WebSocket proxy,
+  internal-only data services, one-shot migrations, multiple API replicas,
+  Docker secrets and a runtime-injected least-privilege viewer key.
+- **Operational evidence:** repeatable HTTP/MQTT/WebSocket load tests, a
+  disposable failure drill for Redis/MQTT/database/API recovery, Prometheus
+  alert rules and a backup/rollback runbook.
 
 ## Components
 
@@ -74,6 +80,8 @@ make install                 # create .venv and install Python/frontend deps
 make up                      # TimescaleDB + EMQX + Redis + server, with migrations
 make e2e                     # real official-frame -> DB -> HTTP verification
 make e2e-multi               # two API replicas + Redis + MQTT shared group
+make e2e-resilience          # disposable fault-injection and recovery drill
+make load-test LOAD_TEST_ARGS='--duration 30 --ingest-rate 20'
 
 cd frontend
 npm run dev                  # http://localhost:5173
@@ -85,11 +93,12 @@ http://localhost:18083.
 
 For a private deployment, generate named keys with
 `python scripts/generate_api_key.py` and mount the resulting JSON file through
-`RID_AUTH_USERS_FILE`. Build the dashboard with one of those keys in
-`VITE_API_TOKEN`; use a read-only viewer key for wall displays. The key is
-embedded in the browser bundle, so terminate HTTPS and do not publish an
-operator/admin bundle to untrusted users. The legacy `RID_API_TOKEN` remains
-available as a single administrator credential.
+`RID_AUTH_USERS_FILE`. The production proxy reads a runtime-mounted viewer
+key and generates `config.js`; no API key is baked into the frontend image.
+The browser can still read that viewer key, so terminate HTTPS and never use
+an operator/admin key for a dashboard. `VITE_API_TOKEN` remains available for
+local or single-tenant builds. The legacy `RID_API_TOKEN` remains available
+as a single administrator credential.
 
 To enable alert webhooks, set both `RID_NOTIFY_WEBHOOK_URL` and
 `RID_NOTIFY_WEBHOOK_SECRET`. The receiver must verify the
@@ -101,33 +110,38 @@ see `docs/02-deployment.md` for the signing contract.
 ```bash
 make test        # edge, server and cross-package contract tests
 make lint        # Ruff + frontend typecheck
+make load-test   # real HTTP/MQTT/WebSocket capacity baseline
+make e2e-resilience  # disposable Redis/MQTT/DB/API recovery drill
 cd frontend && npm audit --omit=dev && npm run build
 ```
 
 The E2E command expects the stack from `make up`. See
-`docs/03-testing.md` for the full test matrix and fixture provenance.
+`docs/03-testing.md` for the full test matrix and fixture provenance, and
+`docs/04-operations.md` for SLOs, drills, backup/restore and incident response.
 
 ## Production Boundaries
 
-The Docker Compose file is a development/reference topology, not a hardened
-production deployment. The API supports named API keys, role enforcement,
-reloadable rotation, an immutable audit trail, Redis-backed multi-replica live
-fan-out, and verified MQTT TLS. Before exposing the stack to an untrusted
-network you still need:
+The root Docker Compose file is a development topology. A separate production
+reference with internal-only DB/MQTT/Redis, TLS termination, multiple API
+replicas and secret files is in `deploy/production/`. The API supports named
+API keys, role enforcement, reloadable rotation, an immutable audit trail,
+Redis-backed multi-replica live fan-out, and verified MQTT TLS. Before
+exposing the stack to an untrusted network you still need:
 
 - MQTT TLS deployment, per-station credentials and ACLs;
 - HTTPS/WSS termination at a reverse proxy;
 - an external identity provider/OIDC and multi-factor login if human accounts
   must be centrally managed;
 - secret management and non-default database credentials;
-- Redis ACL/TLS, high availability, capacity testing and failure drills;
+- Redis ACL/TLS, high availability and a capacity baseline on your hardware;
 - a WebSocket-capable load balancer and one MQTT shared group for replicas;
 - alert retention/archive policy appropriate for your compliance regime.
 
 Single-process deployments use in-memory fan-out by default. Multi-replica
 deployments set `RID_BUS_BACKEND=redis` and `RID_MQTT_SHARED_GROUP`; see
 `docs/01-architecture.md` and `docs/02-deployment.md` for the implemented
-topology and failure semantics.
+topology and failure semantics. Use `deploy/production/` and
+`docs/04-operations.md` as the starting point for a hardened deployment.
 
 ## License
 

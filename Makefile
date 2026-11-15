@@ -1,4 +1,5 @@
-.PHONY: help up down logs install test test-wire e2e e2e-multi lint clean reset
+.PHONY: help up down logs install test test-wire e2e e2e-multi e2e-resilience \
+	load-test validate-deploy lint clean reset
 
 SHELL := /bin/bash
 VENV ?= .venv
@@ -20,6 +21,9 @@ help:
 	@echo "  make test   - unit tests (edge + server) + wire contract"
 	@echo "  make e2e    - real end-to-end: edge -> MQTT -> server -> DB -> HTTP"
 	@echo "  make e2e-multi - two API replicas + Redis + MQTT shared subscription"
+	@echo "  make e2e-resilience - disposable Redis/MQTT/DB/API recovery drill"
+	@echo "  make load-test LOAD_TEST_ARGS='...' - HTTP/MQTT/WebSocket baseline"
+	@echo "  make validate-deploy - production Compose/Nginx static checks"
 	@echo "  make lint   - linters"
 	@echo "  make clean  - remove local caches/artifacts (keeps database data)"
 	@echo "  make reset  - DESTRUCTIVE: stop stack and delete its database volume"
@@ -74,6 +78,36 @@ e2e-multi:
 	RID_DB_PORT=$${RID_DB_PORT:-5433} \
 	RID_MQTT_HOST=$${RID_MQTT_HOST:-127.0.0.1} \
 	PYTHONPATH=$(SRC_PATH) $(PYTHON) scripts/e2e_multireplica.py
+
+e2e-resilience:
+	@test -x $(PYTHON) || { echo "run 'make install' first"; exit 1; }
+	@set -eu; \
+		compose="docker compose -p bwresilience \
+			-f server/docker-compose.yml \
+			-f deploy/testing/compose.resilience.yml"; \
+		$$compose up -d --build; \
+		trap "$$compose down -v" EXIT INT TERM; \
+		RID_DB_PORT=55433 RID_MQTT_HOST=127.0.0.1 RID_MQTT_PORT=51883 \
+		PYTHONPATH=$(SRC_PATH) $(PYTHON) scripts/e2e_resilience.py \
+			--compose-project bwresilience \
+			--compose-file server/docker-compose.yml \
+			--compose-file deploy/testing/compose.resilience.yml \
+			--base-url http://127.0.0.1:58000 \
+			--mqtt-host 127.0.0.1 --mqtt-port 51883 \
+			--token resilience-token \
+			--include-db --include-api --allow-disruptive; \
+		$$compose down -v; \
+		trap - EXIT INT TERM
+
+load-test:
+	@test -x $(PYTHON) || { echo "run 'make install' first"; exit 1; }
+	PYTHONPATH=$(SRC_PATH) $(PYTHON) scripts/load_test.py \
+		$(LOAD_TEST_ARGS)
+
+validate-deploy:
+	docker compose --env-file deploy/production/.env.example \
+		-f deploy/production/compose.yaml config --quiet
+	sh -n deploy/production/docker-entrypoint.d/40-beaconwatch-config.sh
 
 lint:
 	$(PYTHON) -m ruff check edge server tests scripts

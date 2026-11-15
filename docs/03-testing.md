@@ -42,6 +42,9 @@ PYTHONPATH=server/src .venv/bin/python -m pytest -q server/tests
   跨资源安全审计、角色拒绝、审计过滤和游标分页；
 - 可选旧版 admin Bearer token、请求 ID、安全响应头；
 - WebSocket 心跳、fan-out、慢消费者丢弃策略；
+- HTTP/ingest/notification histogram 的累计 bucket、count、sum 和
+  `/metrics` 导出；
+- 密钥文件加载、缺失/为空/过大失败、敏感 repr 脱敏和特殊字符 DSN 编码；
 - 两个 Redis 总线实例的跨副本 fan-out、发布失败后的本地降级与重连、
   非法/未知远端 frame 隔离；
 - Redis 必需时的 readiness、总线指标、应用 lifespan 启动/停止；
@@ -106,6 +109,23 @@ make e2e-multi
 两个 WebSocket 客户端都收到 Redis fan-out、唯一告警和唯一触发审计事件；
 结束后删除本次创建的 station/observation/drone/alert 行。
 
+### 负载与故障恢复
+
+```bash
+python scripts/load_test.py --help
+make e2e-resilience
+```
+
+`load_test.py` 会等待服务端持久化追平，并输出 HTTP/MQTT 吞吐、
+p50/p95/p99、错误率、最终入库比例、相对已入库观测与相对发布观测的
+WebSocket 投递比例、服务端 counter 差值以及 CPU/内存/负载信息，可用于
+同一硬件上的回归比较。
+
+`e2e_resilience.py` 使用 `bwresilience` 专用项目、端口和数据库卷，实际
+停止/启动 Redis、EMQX、TimescaleDB 和 API，检查 readiness、本地降级、
+重连、WebSocket 重新握手与恢复后的入库。它必须通过
+`--allow-disruptive` 显式启用，并拒绝默认/共享项目名。
+
 ### 前端
 
 ```bash
@@ -163,6 +183,8 @@ https://github.com/opendroneid/opendroneid-core-c
 - Node 22：`npm ci`、生产依赖安全审计、TypeScript、生产构建；
 - Node 22：真实构建和 mock/Pages 构建；
 - Docker：Compose 配置校验和服务端镜像构建。
+- Docker：生产 Compose、故障演练 Compose、Nginx `-t`、proxy 镜像和
+  Prometheus rules 校验。
 
 推送 `v*` tag 时，`.github/workflows/release.yml` 会再次执行测试和前端构建，
 成功后自动创建 GitHub Release。
@@ -170,7 +192,7 @@ https://github.com/opendroneid/opendroneid-core-c
 ## 5. 尚未覆盖
 
 - 真实无线电硬件上的长期稳定性；
-- 多机高并发/容量压测；
-- Redis 主从切换、网络分区、长时间断线和大规模多副本故障演练；
+- 多机分布式并发压测和容量承诺；当前脚本提供单环境可重复基线；
+- Redis 主从切换/Cluster、网络分区、长时间断线和大规模多副本故障演练；
 - 浏览器端 E2E/视觉回归；
 - OIDC/MFA 与生产 TLS、MQTT ACL 的渗透测试。

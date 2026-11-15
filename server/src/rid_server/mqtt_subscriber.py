@@ -61,6 +61,9 @@ class MqttSubscriber:
         self.invalid = 0
         self.reconnects = 0
         self.connected = False
+        # Optional RequestMetrics instance; attached by the FastAPI
+        # lifespan.  Unit tests leave it unset.
+        self.metrics: Any = None
 
     # ── Lifecycle ─────────────────────────────────────────────────
     async def start(self) -> None:
@@ -172,8 +175,15 @@ class MqttSubscriber:
         factory = get_session_factory()
         async with factory() as session:
             # Upsert station FIRST so observations FK is satisfied.
-            # ``touch_station`` is an idempotent upsert.
-            await touch_station(session, obs.station_id, online=True)
+            # ``touch_station`` is an idempotent upsert.  Do not commit
+            # here: the observation write commits both rows in one
+            # transaction, halving durable WAL flushes on the hot path.
+            await touch_station(
+                session,
+                obs.station_id,
+                online=True,
+                commit=False,
+            )
             inserted = await write_observation(session, obs)
         if not inserted:
             self.duplicates += 1
@@ -184,6 +194,14 @@ class MqttSubscriber:
             )
             return
         self.persisted += 1
+        if self.metrics is not None:
+            received_at = obs.received_at
+            if received_at.tzinfo is None:
+                received_at = received_at.replace(tzinfo=timezone.utc)
+            lag_seconds = (
+                datetime.now(tz=timezone.utc) - received_at
+            ).total_seconds()
+            self.metrics.observe_ingest_latency(lag_seconds)
 
         # Evaluate rules only after the row is committed: an alert that
         # can't be traced back to a stored observation is worse than no

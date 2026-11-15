@@ -1,0 +1,35 @@
+# Disposable project used by `make e2e-resilience`.  Fixed container names,
+# ports and a dedicated volume keep the drill away from the development
+# stack and its database.
+services:
+  timescaledb:
+    container_name: bw-resilience-timescaledb
+    ports: !override
+      - "55433:5432"
+    volumes: !override
+      - bw_resilience_pgdata:/home/postgres/pgdata/data
+
+  emqx:
+    container_name: bw-resilience-emqx
+    ports: !override
+      - "51883:1883"
+      - "58083:18083"
+
+  redis:
+    container_name: bw-resilience-redis
+    ports: !override
+      - "56379:6379"
+
+  rid-server:
+    container_name: bw-resilience-server
+    environment:
+      RID_BUS_BACKEND: redis
+      RID_REDIS_URL: redis://redis:6379/0
+      RID_REDIS_REQUIRED: "true"
+      RID_API_TOKEN: resilience-token
+      RID_ENV: test
+    ports: !override
+      - "58000:8000"
+
+volumes:
+  bw_resilience_pgdata: {}

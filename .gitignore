@@ -19,3 +19,5 @@ data/
 .hermes/
 .serena/
 *.tsbuildinfo
+deploy/production/secrets/
+deploy/production/certs/

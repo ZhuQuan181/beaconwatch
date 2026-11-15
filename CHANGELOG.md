@@ -1,5 +1,57 @@
 # Changelog
 
+## 1.0.0 - 2026-11-16
+
+### Added
+
+- File-backed configuration for database, Redis, MQTT, legacy API-token
+  and webhook secrets through `RID_*_FILE`. Secret files are size-bounded,
+  fail closed when missing/empty, and are resolved before cross-field
+  validation.
+- Proper labeled HTTP duration histograms, edge-receive-to-commit ingest
+  latency, notification delivery-lag histograms, WebSocket connection
+  counters, database/build information and a notification-enabled gauge.
+- A repeatable HTTP/MQTT/WebSocket load generator that reports throughput,
+  p50/p95/p99, error rates, final durable-ingest ratio, persisted-based and
+  end-to-end WebSocket delivery ratios, server counter deltas and host
+  information for an auditable local baseline. The drain phase polls the
+  server counter instead of assuming that a successful MQTT publish means
+  the row has been committed.
+- A destructive but project-guarded resilience drill that stops and
+  restarts Redis, EMQX, PostgreSQL and the API on a disposable Compose
+  stack, then verifies readiness, local fan-out, reconnect and ingest.
+- A production reference topology with an Nginx TLS/WebSocket proxy,
+  internal-only database/MQTT/Redis paths, one-shot migrations, multiple
+  API replicas, Docker secrets and runtime viewer-key injection.
+- Prometheus alert rules for availability, latency, MQTT/Redis failures,
+  WebSocket drops, notification backlog/dead letters and retention errors.
+- A production operations runbook covering SLOs, capacity testing, fault
+  drills, backup/restore, upgrade/rollback, key rotation and incident
+  response.
+
+### Changed
+
+- The frontend can load its API token from runtime `config.js`, so production
+  deployments no longer need to bake a viewer key into the image or frontend
+  build. `VITE_API_TOKEN` remains supported for local/single-tenant builds.
+- The HTTP duration metric is now a standard Prometheus histogram with
+  `method` and `route` labels. The former unlabeled duration-sum series was
+  removed; update dashboards to use the histogram.
+- The observation bus derives its subscriber count from the actual queue
+  list, avoiding a cached counter drifting from test/direct registrations.
+- Repository/package metadata advanced to 1.0.0.
+
+### Fixed
+
+- Database credentials and database names are percent-encoded before being
+  assembled into the asyncpg URL, so strong generated passwords containing
+  `@`, `:`, `/`, `#` or spaces no longer corrupt the DSN.
+- Notification delivery latency is recorded only after the outbox row is
+  successfully acknowledged as delivered.
+- Station heartbeat refreshes on the observation path now share the
+  observation transaction instead of committing separately, removing one
+  durable WAL flush per ingested message.
+
 ## 0.9.0 - 2026-11-16
 
 ### Added

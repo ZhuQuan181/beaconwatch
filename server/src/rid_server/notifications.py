@@ -10,6 +10,7 @@ from collections import defaultdict
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import httpx
 import orjson
@@ -35,6 +36,7 @@ class _Delivery:
     payload: dict
     attempts: int
     lease_id: str
+    created_at: datetime
 
 
 class NotificationWorker:
@@ -66,6 +68,7 @@ class NotificationWorker:
         self.failed = 0
         self.dead = 0
         self.last_success_at: datetime | None = None
+        self.metrics: Any = None
 
     @property
     def running(self) -> bool:
@@ -254,6 +257,7 @@ class NotificationWorker:
                         payload=row.payload,
                         attempts=row.attempts,
                         lease_id=lease_id,
+                        created_at=row.created_at,
                     )
                 )
             await session.commit()
@@ -287,7 +291,7 @@ class NotificationWorker:
         ).hexdigest()
         headers = {
             "Content-Type": "application/json",
-            "User-Agent": "BeaconWatch-Notifier/0.9.0",
+            "User-Agent": "BeaconWatch-Notifier/1.0.0",
             "Idempotency-Key": delivery.delivery_id,
             "X-BeaconWatch-Schema-Version": "1",
             "X-BeaconWatch-Event": delivery.kind,
@@ -368,6 +372,13 @@ class NotificationWorker:
             return
         self.delivered += 1
         self.last_success_at = now
+        if self.metrics is not None:
+            created_at = delivery.created_at
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            self.metrics.observe_notification_lag(
+                (now - created_at).total_seconds()
+            )
         log.info(
             "notification.delivered",
             delivery_id=delivery.delivery_id,

@@ -38,6 +38,11 @@ jobs:
       - name: Lint
         run: ruff check edge server tests scripts
 
+      - name: Operational script smoke tests
+        run: |
+          PYTHONPATH=edge/src:server/src python scripts/load_test.py --help >/dev/null
+          PYTHONPATH=edge/src:server/src python scripts/e2e_resilience.py --help >/dev/null
+
       - name: Edge tests
         run: PYTHONPATH=edge/src:server/src pytest -q edge/tests
 
@@ -73,7 +78,38 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Validate compose configuration
-        run: docker compose -f server/docker-compose.yml config --quiet
+        run: |
+          docker compose -f server/docker-compose.yml config --quiet
+          docker compose -p bwresilience \
+            -f server/docker-compose.yml \
+            -f deploy/testing/compose.resilience.yml config --quiet
+          docker compose --env-file deploy/production/.env.example \
+            -f deploy/production/compose.yaml config --quiet
+          sh -n deploy/production/docker-entrypoint.d/40-beaconwatch-config.sh
+
+      - name: Validate Prometheus rules
+        run: |
+          docker run --rm \
+            -v "$PWD/deploy/observability:/rules:ro" \
+            --entrypoint promtool \
+            prom/prometheus:v2.55.1 \
+            check rules /rules/prometheus-rules.yml
 
       - name: Build server image
         run: docker build --tag beaconwatch-server:ci ./server
+
+      - name: Build reverse-proxy image
+        run: |
+          docker build --tag beaconwatch-proxy:ci \
+            -f deploy/production/Dockerfile.proxy .
+
+      - name: Validate Nginx configuration
+        run: |
+          mkdir -p /tmp/beaconwatch-certs
+          openssl req -x509 -nodes -days 1 -newkey rsa:2048 \
+            -keyout /tmp/beaconwatch-certs/privkey.pem \
+            -out /tmp/beaconwatch-certs/fullchain.pem \
+            -subj /CN=localhost
+          docker run --rm --entrypoint nginx \
+            -v /tmp/beaconwatch-certs:/etc/nginx/certs:ro \
+            beaconwatch-proxy:ci -t

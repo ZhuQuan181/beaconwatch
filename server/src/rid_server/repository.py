@@ -78,7 +78,11 @@ async def upsert_station(session: AsyncSession, station: StationModel) -> None:
 
 
 async def touch_station(
-    session: AsyncSession, station_id: str, online: bool = True
+    session: AsyncSession,
+    station_id: str,
+    online: bool = True,
+    *,
+    commit: bool = True,
 ) -> None:
     """Refresh ``last_seen``/``online`` for a station, creating it on first sight.
 
@@ -86,6 +90,10 @@ async def touch_station(
     station has registered itself.  We auto-create a placeholder row with
     ``(0,0,0)`` coordinates so the FK on ``observations`` is satisfied.
     Deployment-time ``/stations`` registration will overwrite name + lat/lon.
+
+    ``commit=False`` lets the ingest hot path combine this upsert with the
+    observation/drone writes in one transaction instead of paying two WAL
+    flushes per message.
     """
     now = datetime.now(tz=timezone.utc)
     stmt = (
@@ -105,7 +113,8 @@ async def touch_station(
         )
     )
     await session.execute(stmt)
-    await session.commit()
+    if commit:
+        await session.commit()
 
 
 async def list_stations(session: AsyncSession) -> Sequence[Station]:

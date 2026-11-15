@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 import pytest
 from conftest import make_obs
 from rid_server.config import Settings
+from rid_server.metrics import RequestMetrics
 from rid_server.mqtt_subscriber import MqttSubscriber
 from rid_server.repository import (
     list_drones,
@@ -92,6 +93,23 @@ async def test_handle_message_persists_and_counts(db_engine, _sqlite_settings):
         drones = await list_drones(s, online_within_s=3600)
         assert len(drones) == 1
         assert drones[0].drone_id == "D-1"
+
+
+async def test_handle_message_records_ingest_latency(
+    db_engine, _sqlite_settings
+):
+    metrics = RequestMetrics()
+    sub = MqttSubscriber(_sqlite_settings)
+    sub.metrics = metrics
+    obs = make_obs(drone_id="D-LATENCY", station_id="station-latency")
+
+    await sub.handle_message(
+        "rid/v1/station-latency/obs",
+        json.dumps(obs).encode(),
+    )
+
+    rendered = "\n".join(metrics.render())
+    assert "rid_observation_ingest_latency_seconds_count 1" in rendered
 
 
 async def test_handle_message_invalid_json_increments_invalid(

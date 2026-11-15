@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "keys": [
+    {
+      "key_id": "replace-me",
+      "subject": "viewer",
+      "display_name": "Viewer",
+      "roles": ["viewer"],
+      "api_key_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "enabled": true
+    }
+  ]
+}

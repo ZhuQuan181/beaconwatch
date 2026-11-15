@@ -936,7 +936,10 @@ async def ws_observations(
     ``onclose``.
     """
     principal, subprotocol = authorize_websocket(websocket)
+    metrics = getattr(websocket.app.state, "metrics", None)
     if principal is None:
+        if metrics is not None:
+            metrics.ws_rejected_total += 1
         await websocket.close(
             code=status.WS_1008_POLICY_VIOLATION,
             reason="unauthorized",
@@ -944,6 +947,8 @@ async def ws_observations(
         return
 
     await websocket.accept(subprotocol=subprotocol)
+    if metrics is not None:
+        metrics.ws_connections_total += 1
     settings = getattr(websocket.app.state, "settings", None) or get_settings()
     ping_interval = settings.ws_ping_interval_s
     send_lock = asyncio.Lock()
@@ -962,6 +967,8 @@ async def ws_observations(
         while True:
             raw = await websocket.receive_text()
             if len(raw) > 512:
+                if metrics is not None:
+                    metrics.ws_malformed_messages_total += 1
                 await websocket.close(
                     code=status.WS_1009_MESSAGE_TOO_BIG,
                     reason="message too large",
@@ -970,12 +977,16 @@ async def ws_observations(
             try:
                 payload = json.loads(raw)
             except json.JSONDecodeError:
+                if metrics is not None:
+                    metrics.ws_malformed_messages_total += 1
                 await websocket.close(
                     code=status.WS_1007_INVALID_FRAME_PAYLOAD_DATA,
                     reason="invalid JSON",
                 )
                 return
             if not isinstance(payload, dict):
+                if metrics is not None:
+                    metrics.ws_malformed_messages_total += 1
                 await websocket.close(
                     code=status.WS_1003_UNSUPPORTED_DATA,
                     reason="object frame required",
@@ -985,6 +996,8 @@ async def ws_observations(
             if kind == "ping":
                 await send({"type": "pong"})
             elif kind != "pong":
+                if metrics is not None:
+                    metrics.ws_malformed_messages_total += 1
                 await websocket.close(
                     code=status.WS_1003_UNSUPPORTED_DATA,
                     reason="unsupported message type",
@@ -1019,6 +1032,8 @@ async def ws_observations(
         await asyncio.gather(*tasks, return_exceptions=True)
         with contextlib.suppress(Exception):
             await websocket.close()
+        if metrics is not None:
+            metrics.ws_disconnections_total += 1
 
 
 # ── Helpers ───────────────────────────────────────────────────────────

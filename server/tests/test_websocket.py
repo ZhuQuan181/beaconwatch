@@ -68,6 +68,13 @@ async def test_websocket_receives_published_observation(
             data = json.loads(msg)
             assert data["type"] == "obs"
             assert data["data"]["drone_id"] == "D-WS"
+        metrics = app.state.metrics
+        assert metrics.ws_connections_total >= 1
+        for _ in range(20):
+            if metrics.ws_disconnections_total >= 1:
+                break
+            await asyncio.sleep(0.05)
+        assert metrics.ws_disconnections_total >= 1
     finally:
         server.should_exit = True
         await asyncio.wait_for(server_task, timeout=2.0)

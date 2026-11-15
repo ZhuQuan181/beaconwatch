@@ -22,7 +22,11 @@ import type {
 const BASE = "/api";
 const DEFAULT_TIMEOUT_MS = 8_000;
 const DEFAULT_RETRIES = 2;
-const API_TOKEN = (import.meta.env.VITE_API_TOKEN ?? "").trim();
+const API_TOKEN = (
+  window.__BEACONWATCH_CONFIG__?.apiToken ||
+  import.meta.env.VITE_API_TOKEN ||
+  ""
+).trim();
 
 export interface AlertQuery {
   limit?: number;

@@ -35,7 +35,6 @@ class ObservationBus:
         self._subscribers: list[asyncio.Queue[dict[str, Any]]] = []
         self._max_queue = max_queue_per_client
         self._lock = asyncio.Lock()
-        self._subscriber_count = 0
         self._dropped_frames = 0
         self._delivered_frames = 0
         self._connected = True
@@ -89,25 +88,25 @@ class ObservationBus:
                         dead.append(q)
             for q in dead:
                 self._subscribers.remove(q)
-                self._subscriber_count = len(self._subscribers)
 
     @asynccontextmanager
     async def subscribe(self) -> AsyncIterator[asyncio.Queue[dict[str, Any]]]:
         q: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=self._max_queue)
         async with self._lock:
             self._subscribers.append(q)
-            self._subscriber_count = len(self._subscribers)
         try:
             yield q
         finally:
             async with self._lock:
                 if q in self._subscribers:
                     self._subscribers.remove(q)
-                    self._subscriber_count = len(self._subscribers)
 
     @property
     def subscriber_count(self) -> int:
-        return self._subscriber_count
+        # ``len`` is atomic under CPython and reflects test/direct
+        # registrations as well as the context-manager path.  A cached
+        # counter could drift when the list is mutated outside ``_push``.
+        return len(self._subscribers)
 
     @property
     def dropped_frames(self) -> int:

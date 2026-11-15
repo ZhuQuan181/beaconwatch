@@ -1,6 +1,6 @@
 [project]
 name = "rid-edge"
-version = "0.9.0"
+version = "1.0.0"
 description = "Drone Remote ID edge receiver (Wi-Fi + BLE -> MQTT)"
 requires-python = ">=3.11"
 dependencies = [

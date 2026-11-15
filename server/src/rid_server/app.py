@@ -15,7 +15,7 @@ from .bus import create_bus
 from .config import get_settings
 from .db import dispose_engine, get_session_factory
 from .logging_setup import configure_logging, get_logger
-from .metrics import RequestMetrics
+from .metrics import RequestMetrics, _escape_label
 from .mqtt_subscriber import MqttSubscriber
 from .notifications import NotificationWorker
 from .repository import (
@@ -51,6 +51,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await bus.start()
 
     subscriber = MqttSubscriber(settings)
+    subscriber.metrics = app.state.metrics
     app.state.subscriber = subscriber
     notifier = (
         NotificationWorker(settings)
@@ -59,6 +60,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     app.state.notifier = notifier
     if notifier is not None:
+        notifier.metrics = app.state.metrics
         await notifier.start()
     retention = (
         RetentionWorker(settings)
@@ -126,7 +128,7 @@ def create_app() -> FastAPI:
     request_metrics = RequestMetrics()
     app = FastAPI(
         title="RID Server",
-        version="0.9.0",
+        version="1.0.0",
         lifespan=lifespan,
     )
     app.state.settings = settings
@@ -209,6 +211,18 @@ def create_app() -> FastAPI:
             "rid_ws_delivered_frames_total": int(
                 getattr(bus, "delivered_frames", 0)
             ),
+            "rid_ws_connections_total": int(
+                request.app.state.metrics.ws_connections_total
+            ),
+            "rid_ws_disconnections_total": int(
+                request.app.state.metrics.ws_disconnections_total
+            ),
+            "rid_ws_rejected_total": int(
+                request.app.state.metrics.ws_rejected_total
+            ),
+            "rid_ws_malformed_messages_total": int(
+                request.app.state.metrics.ws_malformed_messages_total
+            ),
             "rid_bus_redis_connected": int(
                 bool(getattr(bus, "redis_connected", False))
             ),
@@ -226,6 +240,9 @@ def create_app() -> FastAPI:
             ),
             "rid_notification_worker_running": int(
                 bool(getattr(notifier, "running", False))
+            ),
+            "rid_notification_enabled": int(
+                request.app.state.settings.notifications_enabled
             ),
             "rid_notification_last_success_timestamp_seconds": (
                 notifier.last_success_at.timestamp()
@@ -254,6 +271,7 @@ def create_app() -> FastAPI:
             factory = get_session_factory()
             async with factory() as session:
                 outbox = await notification_outbox_counts(session)
+            database_up = 1
         except Exception:  # noqa: BLE001
             outbox = {
                 "pending": 0,
@@ -263,8 +281,10 @@ def create_app() -> FastAPI:
                 "attempts": 0,
                 "failures": 0,
             }
+            database_up = 0
         values.update(
             {
+                "rid_database_up": database_up,
                 "rid_notification_outbox_pending": outbox["pending"],
                 "rid_notification_outbox_delivering": outbox[
                     "delivering"
@@ -279,7 +299,13 @@ def create_app() -> FastAPI:
                 ],
             }
         )
-        lines = [f"{name} {value}" for name, value in values.items()]
+        lines = [
+            "rid_build_info"
+            f'{{version="{_escape_label(request.app.version)}",'
+            f'env="{_escape_label(request.app.state.settings.env)}",'
+            f'instance_id="{_escape_label(request.app.state.settings.instance_id)}"}} 1'
+        ]
+        lines.extend(f"{name} {value}" for name, value in values.items())
         lines.extend(request.app.state.metrics.render())
         body = "\n".join(lines) + "\n"
         return Response(body, media_type="text/plain; version=0.0.4")
