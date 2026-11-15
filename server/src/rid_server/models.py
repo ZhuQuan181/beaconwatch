@@ -107,7 +107,7 @@ class StationInfo(BaseModel):
     station_id: str = Field(min_length=1, max_length=64)
     location: Position
     name: str | None = Field(default=None, max_length=128)
-    firmware_version: str = Field(default="0.4.0", max_length=32)
+    firmware_version: str = Field(default="0.5.0", max_length=32)
     capabilities: list[str] = Field(default_factory=lambda: ["ble", "wifi_nan"])
 
 
@@ -134,9 +134,15 @@ class AlertOut(BaseModel):
     at: str = ""
     first_seen_at: str | None = None
     trigger_count: int = 1
+    status: Literal["open", "acknowledged", "resolved"] = "open"
+    updated_at: str | None = None
     acknowledged_at: str | None = None
     acknowledged_by: str | None = None
     acknowledgement_note: str | None = None
+    resolved_at: str | None = None
+    resolved_by: str | None = None
+    resolution_note: str | None = None
+    reopen_count: int = 0
 
 
 class AlertAckIn(BaseModel):
@@ -158,6 +164,57 @@ class AlertAckIn(BaseModel):
         if not value:
             raise ValueError("acknowledged_by must not be blank")
         return value
+
+
+class AlertResolveIn(BaseModel):
+    """Close an alert and record who determined it was handled."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    resolved_by: str = Field(min_length=1, max_length=128)
+    note: str = Field(default="", max_length=1000)
+
+    @field_validator("resolved_by")
+    @classmethod
+    def resolved_by_must_not_be_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("resolved_by must not be blank")
+        return value
+
+
+class AlertReopenIn(BaseModel):
+    """Reopen a resolved alert as a new active handling cycle."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reopened_by: str = Field(min_length=1, max_length=128)
+    note: str = Field(default="", max_length=1000)
+
+    @field_validator("reopened_by")
+    @classmethod
+    def reopened_by_must_not_be_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("reopened_by must not be blank")
+        return value
+
+
+class AlertEventOut(BaseModel):
+    """One immutable alert lifecycle event."""
+
+    event_id: str
+    alert_id: str
+    action: Literal[
+        "triggered",
+        "acknowledged",
+        "resolved",
+        "reopened",
+    ]
+    actor: str | None = None
+    note: str | None = None
+    at: str
+    detail: dict = Field(default_factory=dict)
 
 
 class DroneSummary(BaseModel):

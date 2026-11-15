@@ -211,6 +211,10 @@ async def main() -> int:
         ]
         acknowledged = None
         retried = None
+        resolved = None
+        reopened = None
+        final_resolution = None
+        alert_events = None
         if run_alerts:
             alert = run_alerts[0]
             ack_response = await client.post(
@@ -228,6 +232,43 @@ async def main() -> int:
             )
             retry_response.raise_for_status()
             retried = retry_response.json()
+            resolve_response = await client.post(
+                f"/alerts/{alert['alert_id']}/resolve",
+                json={
+                    "resolved_by": "e2e-operator",
+                    "note": "end-to-end resolution",
+                },
+            )
+            resolve_response.raise_for_status()
+            resolved = resolve_response.json()
+            resolve_retry_response = await client.post(
+                f"/alerts/{alert['alert_id']}/resolve",
+                json={"resolved_by": "retry-operator"},
+            )
+            resolve_retry_response.raise_for_status()
+            reopen_response = await client.post(
+                f"/alerts/{alert['alert_id']}/reopen",
+                json={
+                    "reopened_by": "e2e-operator",
+                    "note": "end-to-end reopen",
+                },
+            )
+            reopen_response.raise_for_status()
+            reopened = reopen_response.json()
+            final_response = await client.post(
+                f"/alerts/{alert['alert_id']}/resolve",
+                json={
+                    "resolved_by": "e2e-operator",
+                    "note": "end-to-end final resolution",
+                },
+            )
+            final_response.raise_for_status()
+            final_resolution = final_response.json()
+            events_response = await client.get(
+                f"/alerts/{alert['alert_id']}/events"
+            )
+            events_response.raise_for_status()
+            alert_events = events_response.json()
 
     print(f"[5/6] HTTP returned {len(rows)}/{len(persisted)} of our rows")
     for row in rows:
@@ -264,13 +305,20 @@ async def main() -> int:
         ok = False
     else:
         alert = run_alerts[0]
-        if acknowledged is None or retried is None:
+        if (
+            acknowledged is None
+            or retried is None
+            or resolved is None
+            or reopened is None
+            or final_resolution is None
+            or alert_events is None
+        ):
             print("FAIL: acknowledgement requests did not complete")
             ok = False
         else:
             print(
-                f"[6/6] alert {alert['alert_id']} persisted and acknowledged "
-                f"by {acknowledged['acknowledged_by']}"
+                f"[6/6] alert {alert['alert_id']} lifecycle "
+                f"ack -> resolve -> reopen -> resolve verified"
             )
             if acknowledged.get("acknowledged_by") != "e2e-operator":
                 print("FAIL: acknowledgement actor was not persisted")
@@ -278,9 +326,26 @@ async def main() -> int:
             if retried.get("acknowledged_by") != "e2e-operator":
                 print("FAIL: retried acknowledgement overwrote the audit trail")
                 ok = False
+            if resolved.get("status") != "resolved":
+                print("FAIL: alert resolution was not persisted")
+                ok = False
+            if reopened.get("status") != "open":
+                print("FAIL: alert reopen did not restore active state")
+                ok = False
+            if reopened.get("reopen_count") != 1:
+                print("FAIL: alert reopen count was not persisted")
+                ok = False
+            if final_resolution.get("status") != "resolved":
+                print("FAIL: alert could not be resolved after reopen")
+                ok = False
+            actions = [event.get("action") for event in alert_events]
+            for action in ("acknowledged", "resolved", "reopened"):
+                if action not in actions:
+                    print(f"FAIL: audit trail is missing {action}")
+                    ok = False
 
     print(
-        "PASS: official radio bytes -> MQTT -> DB -> HTTP -> alert ack verified"
+        "PASS: official radio bytes -> MQTT -> DB -> HTTP -> alert lifecycle verified"
         if ok
         else "FAILED"
     )

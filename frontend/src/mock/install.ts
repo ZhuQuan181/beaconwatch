@@ -7,6 +7,7 @@
  */
 import type { WsFrame } from "../types";
 import {
+  alertEvents,
   alerts,
   droneSummaries,
   nextLiveFrames,
@@ -52,14 +53,22 @@ function filterObservations(url: URL): Response {
 
 function handleApi(url: URL, init: RequestInit): Response {
   const method = (init.method ?? "GET").toUpperCase();
-  const ackMatch = url.pathname.match(/^\/api\/alerts\/([^/]+)\/ack$/);
-  if (ackMatch && method === "POST") {
-    const alertId = decodeURIComponent(ackMatch[1]);
+  const actionMatch = url.pathname.match(
+    /^\/api\/alerts\/([^/]+)\/(ack|resolve|reopen)$/,
+  );
+  if (actionMatch && method === "POST") {
+    const alertId = decodeURIComponent(actionMatch[1]);
+    const action = actionMatch[2];
     const alert = alerts.find((row) => row.alert_id === alertId);
     if (!alert) {
       return jsonResponse({ detail: "alert not found" }, 404);
     }
-    let body: { acknowledged_by?: string; note?: string } = {};
+    let body: {
+      acknowledged_by?: string;
+      resolved_by?: string;
+      reopened_by?: string;
+      note?: string;
+    } = {};
     try {
       body = JSON.parse(
         typeof init.body === "string" ? init.body : "{}",
@@ -67,16 +76,100 @@ function handleApi(url: URL, init: RequestInit): Response {
     } catch {
       return jsonResponse({ detail: "invalid JSON" }, 400);
     }
-    const actor = body.acknowledged_by?.trim() ?? "";
+    const actor =
+      (
+        action === "ack"
+          ? body.acknowledged_by
+          : action === "resolve"
+            ? body.resolved_by
+            : body.reopened_by
+      )?.trim() ?? "";
     if (!actor) {
-      return jsonResponse({ detail: "acknowledged_by is required" }, 422);
+      return jsonResponse({ detail: "actor is required" }, 422);
     }
-    if (!alert.acknowledged_at) {
-      alert.acknowledged_at = new Date().toISOString();
-      alert.acknowledged_by = actor;
-      alert.acknowledgement_note = body.note?.trim() || null;
+    const now = new Date().toISOString();
+    const note = body.note?.trim() || null;
+    const events = (alertEvents[alertId] ??= []);
+    if (action === "ack") {
+      if (alert.status === "resolved") {
+        return jsonResponse(
+          { detail: "resolved alerts must be reopened first" },
+          409,
+        );
+      }
+      if (!alert.acknowledged_at) {
+        alert.acknowledged_at = now;
+        alert.acknowledged_by = actor;
+        alert.acknowledgement_note = note;
+        alert.status = "acknowledged";
+        alert.updated_at = now;
+        events.push({
+          event_id: `event-${alertId}-ack-${Date.now()}`,
+          alert_id: alertId,
+          action: "acknowledged",
+          actor,
+          note,
+          at: now,
+          detail: {},
+        });
+      }
+    } else if (action === "resolve") {
+      if (!alert.resolved_at) {
+        alert.resolved_at = now;
+        alert.resolved_by = actor;
+        alert.resolution_note = note;
+        alert.status = "resolved";
+        alert.updated_at = now;
+        events.push({
+          event_id: `event-${alertId}-resolve-${Date.now()}`,
+          alert_id: alertId,
+          action: "resolved",
+          actor,
+          note,
+          at: now,
+          detail: {},
+        });
+      }
+    } else {
+      if (alert.status !== "resolved") {
+        return jsonResponse(
+          { detail: "only resolved alerts can be reopened" },
+          409,
+        );
+      }
+      const previousResolutionNote = alert.resolution_note;
+      alert.status = "open";
+      alert.acknowledged_at = null;
+      alert.acknowledged_by = null;
+      alert.acknowledgement_note = null;
+      alert.resolved_at = null;
+      alert.resolved_by = null;
+      alert.resolution_note = null;
+      alert.reopen_count = (alert.reopen_count ?? 0) + 1;
+      alert.updated_at = now;
+      events.push({
+        event_id: `event-${alertId}-reopen-${Date.now()}`,
+        alert_id: alertId,
+        action: "reopened",
+        actor,
+        note,
+        at: now,
+        detail: {
+          automatic: false,
+          previous_resolution_note: previousResolutionNote,
+        },
+      });
     }
     return jsonResponse(alert);
+  }
+
+  const eventMatch = url.pathname.match(/^\/api\/alerts\/([^/]+)\/events$/);
+  if (eventMatch && method === "GET") {
+    const alertId = decodeURIComponent(eventMatch[1]);
+    if (!alerts.some((row) => row.alert_id === alertId)) {
+      return jsonResponse({ detail: "alert not found" }, 404);
+    }
+    return jsonResponse(alertEvents[alertId] ?? []);
   }
 
   switch (url.pathname) {
@@ -103,7 +196,18 @@ function handleApi(url: URL, init: RequestInit): Response {
     case "/api/alerts": {
       const requested = Number(url.searchParams.get("limit") ?? "50");
       const limit = Number.isFinite(requested) ? requested : 50;
-      return jsonResponse(alerts.slice(0, limit));
+      const status = url.searchParams.get("status");
+      let rows = alerts;
+      if (status === "active") {
+        rows = rows.filter((row) => row.status !== "resolved");
+      } else if (status) {
+        rows = rows.filter((row) => row.status === status);
+      }
+      const rule = url.searchParams.get("rule");
+      if (rule) rows = rows.filter((row) => row.rule === rule);
+      const droneId = url.searchParams.get("drone_id");
+      if (droneId) rows = rows.filter((row) => row.drone_id === droneId);
+      return jsonResponse(rows.slice(0, limit));
     }
     default:
       return jsonResponse({ detail: "mock endpoint not found" }, 404);

@@ -8,6 +8,7 @@
  */
 import type {
   Alert,
+  AlertEvent,
   DroneObservation,
   DroneSummary,
   GeofenceZone,
@@ -258,6 +259,34 @@ export const api = {
     jsonPost<Alert>(
       `/alerts/${encodeURIComponent(alertId)}/ack`,
       body,
+      { signal },
+    ),
+
+  resolveAlert: (
+    alertId: string,
+    body: { resolved_by: string; note?: string },
+    signal?: AbortSignal,
+  ) =>
+    jsonPost<Alert>(
+      `/alerts/${encodeURIComponent(alertId)}/resolve`,
+      body,
+      { signal },
+    ),
+
+  reopenAlert: (
+    alertId: string,
+    body: { reopened_by: string; note?: string },
+    signal?: AbortSignal,
+  ) =>
+    jsonPost<Alert>(
+      `/alerts/${encodeURIComponent(alertId)}/reopen`,
+      body,
+      { signal, retries: 0 },
+    ),
+
+  listAlertEvents: (alertId: string, signal?: AbortSignal) =>
+    jsonGet<AlertEvent[]>(
+      `/alerts/${encodeURIComponent(alertId)}/events`,
       { signal },
     ),
 };

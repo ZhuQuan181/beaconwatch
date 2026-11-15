@@ -5,7 +5,7 @@ import asyncio
 import contextlib
 import json
 from datetime import datetime, timedelta, timezone
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import (
     APIRouter,
@@ -27,7 +27,10 @@ from .db import GeofenceZone, Observation, get_session
 from .logging_setup import get_logger
 from .models import (
     AlertAckIn,
+    AlertEventOut,
     AlertOut,
+    AlertReopenIn,
+    AlertResolveIn,
     DroneObservation,
     DroneSummary,
     GeofenceZoneOut,
@@ -37,15 +40,21 @@ from .models import (
 )
 from .pagination import decode_cursor, encode_cursor
 from .repository import (
+    AlertStateConflict,
     acknowledge_alert,
+    alert_event_to_out,
     alert_to_out,
     drone_to_summary,
+    get_alert,
     get_drone,
+    list_alert_events,
     list_alerts,
     list_drones,
     list_observations,
     list_stations,
     list_unidentified_drones,
+    reopen_alert,
+    resolve_alert,
 )
 from .security import authorize_websocket
 
@@ -149,14 +158,92 @@ async def upsert_zone(
 
 
 # ── Alerts ────────────────────────────────────────────────────────────
+def _alert_window(
+    from_: datetime | None, to: datetime | None
+) -> tuple[datetime | None, datetime | None]:
+    since = _as_utc(from_) if from_ is not None else None
+    until = _as_utc(to) if to is not None else None
+    if since is not None and until is not None and since > until:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail="'from' must be earlier than 'to'",
+        )
+    return since, until
+
+
+async def _broadcast_alert_update(request: Request, row) -> AlertOut:
+    result = alert_to_out(row)
+    payload = result.model_dump(mode="json")
+    ring = getattr(request.app.state, "alerts", None)
+    if ring is not None:
+        ring.add(payload)
+    bus = getattr(request.app.state, "bus", None)
+    if bus is not None:
+        try:
+            await bus.publish_alert(payload)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("alert.broadcast.failed", error=str(exc)[:200])
+    return result
+
+
 @router.get("/alerts", response_model=list[AlertOut])
 async def get_alerts(
     session: Annotated[AsyncSession, Depends(get_session)],
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
+    status_filter: Annotated[
+        Literal["active", "open", "acknowledged", "resolved"] | None,
+        Query(alias="status", description="Lifecycle state filter"),
+    ] = None,
+    rule: Annotated[str | None, Query(min_length=1, max_length=32)] = None,
+    drone_id: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
+    from_: Annotated[
+        datetime | None,
+        Query(alias="from", description="Triggered-at window start"),
+    ] = None,
+    to: Annotated[datetime | None, Query()] = None,
 ) -> list[AlertOut]:
-    """Return the durable alert ledger, newest trigger first."""
-    rows = await list_alerts(session, limit=limit)
+    """Return the durable alert ledger, newest trigger first.
+
+    ``status=active`` means open plus acknowledged.  The other status values
+    select exactly one lifecycle state.
+    """
+    since, until = _alert_window(from_, to)
+    rows = await list_alerts(
+        session,
+        limit=limit,
+        status=status_filter,
+        rule=rule,
+        drone_id=drone_id,
+        since=since,
+        until=until,
+    )
     return [alert_to_out(row) for row in rows]
+
+
+@router.get("/alerts/{alert_id}", response_model=AlertOut)
+async def get_alert_route(
+    alert_id: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> AlertOut:
+    row = await get_alert(session, alert_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="alert not found")
+    return alert_to_out(row)
+
+
+@router.get(
+    "/alerts/{alert_id}/events",
+    response_model=list[AlertEventOut],
+)
+async def get_alert_events_route(
+    alert_id: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+) -> list[AlertEventOut]:
+    if await get_alert(session, alert_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="alert not found")
+    rows = await list_alert_events(session, alert_id, limit=limit)
+    return [alert_event_to_out(row) for row in rows]
 
 
 @router.post("/alerts/{alert_id}/ack", response_model=AlertOut)
@@ -171,26 +258,59 @@ async def acknowledge_alert_route(
     Repeated calls are idempotent: the first operator, timestamp and note
     are never overwritten by a retry.
     """
-    row = await acknowledge_alert(
+    try:
+        row = await acknowledge_alert(
+            session,
+            alert_id,
+            acknowledged_by=body.acknowledged_by,
+            note=body.note,
+        )
+    except AlertStateConflict as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="alert not found")
+    return await _broadcast_alert_update(request, row)
+
+
+@router.post("/alerts/{alert_id}/resolve", response_model=AlertOut)
+async def resolve_alert_route(
+    alert_id: str,
+    body: AlertResolveIn,
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> AlertOut:
+    """Resolve an alert and preserve the operator's closing audit record."""
+    row = await resolve_alert(
         session,
         alert_id,
-        acknowledged_by=body.acknowledged_by,
+        resolved_by=body.resolved_by,
         note=body.note,
     )
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="alert not found")
-    result = alert_to_out(row)
-    payload = result.model_dump(mode="json")
-    ring = getattr(request.app.state, "alerts", None)
-    if ring is not None:
-        ring.add(payload)
-    bus = getattr(request.app.state, "bus", None)
-    if bus is not None:
-        try:
-            await bus.publish_alert(payload)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("alert.ack.broadcast.failed", error=str(exc)[:200])
-    return result
+    return await _broadcast_alert_update(request, row)
+
+
+@router.post("/alerts/{alert_id}/reopen", response_model=AlertOut)
+async def reopen_alert_route(
+    alert_id: str,
+    body: AlertReopenIn,
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> AlertOut:
+    """Reopen a resolved alert for another handling cycle."""
+    try:
+        row = await reopen_alert(
+            session,
+            alert_id,
+            reopened_by=body.reopened_by,
+            note=body.note,
+        )
+    except AlertStateConflict as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="alert not found")
+    return await _broadcast_alert_update(request, row)
 
 
 # ── Drones ────────────────────────────────────────────────────────────

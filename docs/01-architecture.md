@@ -158,10 +158,18 @@ BeaconWatch 接收无人机广播的 Remote ID（ASTM F3411 / Open Drone ID）�
 - 同一 `(drone, rule, zone)` 在窗口内去重；
 - `alert_id` 使用稳定 SHA-256 摘要，不使用 Python 加盐 `hash()`；
 - 告警写入 `alerts` 表，服务重启后仍可查询；
-- 同一 `alert_id` 再次触发时累加 `trigger_count`，保留首次出现时间与确认信息；
+- 告警生命周期为 `open → acknowledged → resolved`，也可以直接从
+  `open` 解决；
+- 同一 `alert_id` 再次触发时累加 `trigger_count`；若告警已解决，则自动
+  进入新的处置周期、清空上一周期活动处置字段并累加 `reopen_count`；
 - `POST /alerts/{alert_id}/ack` 记录首次确认的操作员、时间和可选备注；
 - 重复确认是幂等的，不覆盖第一次确认的审计字段；
-- 确认结果通过 WebSocket 广播，其他在线操作员无需刷新即可看到状态；
+- `POST /alerts/{alert_id}/resolve` 记录解决人、时间和可选解决说明；
+- `POST /alerts/{alert_id}/reopen` 将已解决告警重新打开，并开始新的确认
+  周期；
+- 每次触发、确认、解决和重开都会写入不可变的 `alert_events` 审计表；
+- `GET /alerts/{alert_id}/events` 返回完整生命周期时间线；
+- 状态变更通过 WebSocket 广播，其他在线操作员无需刷新即可看到；
 - 告警落库失败会记录日志并降级为仅实时推送，不阻断观测入库；
 - 进程内 ring 只作为最近告警的轻量缓存，不再是数据源。
 
@@ -175,7 +183,11 @@ BeaconWatch 接收无人机广播的 Remote ID（ASTM F3411 / Open Drone ID）�
 - `GET /observations/page`
 - `GET /zones`, `PUT /zones/{zone_id}`
 - `GET /alerts`
+- `GET /alerts/{alert_id}`
+- `GET /alerts/{alert_id}/events`
 - `POST /alerts/{alert_id}/ack`
+- `POST /alerts/{alert_id}/resolve`
+- `POST /alerts/{alert_id}/reopen`
 - `WS /ws/observations`
 - `GET /health/live`, `GET /health/ready`, `GET /healthz`
 - `GET /metrics`
@@ -213,8 +225,9 @@ WebSocket 推送以下 frame：
 - 最近站点、station/operator 时间窗和 `(received_at, observation_id)` 游标
   查询都有对应索引；
 - geofence polygon 以 JSON/JSONB 保存，API、规则引擎和地图读取同一份几何；
-- `alerts` 表保存触发次数、首次/最近触发时间以及首次确认审计字段，并按
-  `triggered_at`、`drone_id`、`acknowledged_at` 建立索引；
+- `alerts` 表保存当前状态、触发次数、首次/最近触发时间、确认与解决字段，
+  并按状态/触发时间、无人机/触发时间和确认时间建立索引；
+- `alert_events` 表以追加方式保存触发、确认、解决和重开事件，不覆盖历史；
 - Alembic 在容器启动时自动执行 `upgrade head`。
 
 ## 9. 运维接口

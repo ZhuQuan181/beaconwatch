@@ -73,6 +73,7 @@ export interface GeofenceZone {
 }
 
 export type AlertRule = "geofence" | "altitude" | "unidentified";
+export type AlertStatus = "open" | "acknowledged" | "resolved";
 
 export interface Alert {
   alert_id: string;
@@ -84,9 +85,25 @@ export interface Alert {
   at: string;
   first_seen_at?: string | null;
   trigger_count?: number;
+  status: AlertStatus;
+  updated_at?: string | null;
   acknowledged_at?: string | null;
   acknowledged_by?: string | null;
   acknowledgement_note?: string | null;
+  resolved_at?: string | null;
+  resolved_by?: string | null;
+  resolution_note?: string | null;
+  reopen_count?: number;
+}
+
+export interface AlertEvent {
+  event_id: string;
+  alert_id: string;
+  action: "triggered" | "acknowledged" | "resolved" | "reopened";
+  actor?: string | null;
+  note?: string | null;
+  at: string;
+  detail: Record<string, unknown>;
 }
 
 /** Frame sent by the server over /ws/observations. */

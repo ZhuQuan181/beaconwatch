@@ -8,15 +8,26 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Sequence
+from uuid import uuid4
 
-from sqlalchemy import and_, case, or_, select, update
+from sqlalchemy import and_, case, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .alerts import Alert
-from .db import AlertRecord, Drone, Observation, Station
-from .models import AlertOut, DroneObservation, DroneSummary, Position
+from .db import AlertEvent, AlertRecord, Drone, Observation, Station
+from .models import (
+    AlertEventOut,
+    AlertOut,
+    DroneObservation,
+    DroneSummary,
+    Position,
+)
 from .models import Station as StationModel
+
+
+class AlertStateConflict(Exception):
+    """The requested lifecycle transition is not valid for current state."""
 
 
 # ── Station ───────────────────────────────────────────────────────────
@@ -313,6 +324,12 @@ def _iso(value: datetime | None) -> str | None:
     return value.astimezone(timezone.utc).isoformat()
 
 
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def alert_to_out(row: AlertRecord) -> AlertOut:
     """Map a durable alert row to the public wire shape."""
     return AlertOut(
@@ -325,9 +342,15 @@ def alert_to_out(row: AlertRecord) -> AlertOut:
         at=_iso(row.triggered_at) or "",
         first_seen_at=_iso(row.first_seen_at),
         trigger_count=row.trigger_count,
+        status=row.status or "open",
+        updated_at=_iso(row.updated_at),
         acknowledged_at=_iso(row.acknowledged_at),
         acknowledged_by=row.acknowledged_by,
         acknowledgement_note=row.acknowledgement_note,
+        resolved_at=_iso(row.resolved_at),
+        resolved_by=row.resolved_by,
+        resolution_note=row.resolution_note,
+        reopen_count=row.reopen_count or 0,
     )
 
 
@@ -343,7 +366,55 @@ def transient_alert_to_out(alert: Alert) -> AlertOut:
         at=alert.at,
         first_seen_at=alert.at or None,
         trigger_count=1,
+        status="open",
+        updated_at=alert.at or None,
     )
+
+
+def alert_event_to_out(row: AlertEvent) -> AlertEventOut:
+    return AlertEventOut(
+        event_id=row.event_id,
+        alert_id=row.alert_id,
+        action=row.action,
+        actor=row.actor,
+        note=row.note,
+        at=_iso(row.occurred_at) or "",
+        detail=row.detail or {},
+    )
+
+
+def _append_alert_event(
+    session: AsyncSession,
+    alert_id: str,
+    *,
+    action: str,
+    actor: str | None,
+    note: str | None,
+    occurred_at: datetime,
+    detail: dict | None = None,
+) -> None:
+    session.add(
+        AlertEvent(
+            event_id=uuid4().hex,
+            alert_id=alert_id,
+            action=action,
+            actor=actor,
+            note=note,
+            occurred_at=occurred_at,
+            detail=detail or {},
+        )
+    )
+
+
+async def _alert_for_update(
+    session: AsyncSession, alert_id: str
+) -> AlertRecord | None:
+    result = await session.execute(
+        select(AlertRecord)
+        .where(AlertRecord.alert_id == alert_id)
+        .with_for_update()
+    )
+    return result.scalar_one_or_none()
 
 
 async def upsert_alert(
@@ -356,11 +427,27 @@ async def upsert_alert(
 
     ``alert_id`` is deterministic per (drone, rule, zone), so a recurrence
     after the rule dedup window must update the existing operational row
-    rather than create a duplicate.  The first observation time and any
-    acknowledgement are deliberately preserved.
+    rather than create a duplicate.  A recurrence after resolution starts a
+    new handling cycle, clears the previous cycle's live disposition fields,
+    increments ``reopen_count`` and records the transition in the audit log.
     """
     observed_at = _parse_alert_time(
         alert.at, now or datetime.now(tz=timezone.utc)
+    )
+    existing = await _alert_for_update(session, alert.alert_id)
+    previous_resolution_note = (
+        existing.resolution_note if existing is not None else None
+    )
+    auto_reopen = bool(
+        existing is not None
+        and existing.status == "resolved"
+        and existing.resolved_at is not None
+        and _as_utc(existing.resolved_at) < observed_at
+    )
+    reopen_condition = and_(
+        AlertRecord.status == "resolved",
+        AlertRecord.resolved_at.is_not(None),
+        AlertRecord.resolved_at < observed_at,
     )
     stmt = (
         pg_insert(AlertRecord)
@@ -374,6 +461,9 @@ async def upsert_alert(
             first_seen_at=observed_at,
             triggered_at=observed_at,
             trigger_count=1,
+            status="open",
+            updated_at=observed_at,
+            reopen_count=0,
         )
         .on_conflict_do_update(
             index_elements=["alert_id"],
@@ -398,31 +488,146 @@ async def upsert_alert(
                     else_=AlertRecord.triggered_at,
                 ),
                 trigger_count=AlertRecord.trigger_count + 1,
+                status=case(
+                    (reopen_condition, "open"),
+                    else_=AlertRecord.status,
+                ),
+                updated_at=case(
+                    (
+                        AlertRecord.updated_at < observed_at,
+                        observed_at,
+                    ),
+                    else_=AlertRecord.updated_at,
+                ),
+                acknowledged_at=case(
+                    (reopen_condition, None),
+                    else_=AlertRecord.acknowledged_at,
+                ),
+                acknowledged_by=case(
+                    (reopen_condition, None),
+                    else_=AlertRecord.acknowledged_by,
+                ),
+                acknowledgement_note=case(
+                    (reopen_condition, None),
+                    else_=AlertRecord.acknowledgement_note,
+                ),
+                resolved_at=case(
+                    (reopen_condition, None),
+                    else_=AlertRecord.resolved_at,
+                ),
+                resolved_by=case(
+                    (reopen_condition, None),
+                    else_=AlertRecord.resolved_by,
+                ),
+                resolution_note=case(
+                    (reopen_condition, None),
+                    else_=AlertRecord.resolution_note,
+                ),
+                reopen_count=case(
+                    (
+                        reopen_condition,
+                        AlertRecord.reopen_count + 1,
+                    ),
+                    else_=AlertRecord.reopen_count,
+                ),
             ),
         )
     )
     await session.execute(stmt)
-    await session.commit()
-    row = await session.get(AlertRecord, alert.alert_id)
+    await session.flush()
+    row = await session.get(
+        AlertRecord, alert.alert_id, populate_existing=True
+    )
     if row is None:  # pragma: no cover - only possible after a lost commit
         raise RuntimeError("alert upsert did not produce a row")
+    if existing is None:
+        _append_alert_event(
+            session,
+            alert.alert_id,
+            action="triggered",
+            actor="system",
+            note=None,
+            occurred_at=observed_at,
+            detail={
+                "rule": alert.rule,
+                "severity": alert.severity,
+                "drone_id": alert.drone_id,
+            },
+        )
+    elif auto_reopen:
+        _append_alert_event(
+            session,
+            alert.alert_id,
+            action="reopened",
+            actor="system",
+            note="规则再次触发，已自动重新打开",
+            occurred_at=observed_at,
+            detail={
+                "automatic": True,
+                "previous_resolution_note": previous_resolution_note,
+            },
+        )
+    await session.commit()
     await session.refresh(row)
     return row
 
 
 async def list_alerts(
-    session: AsyncSession, *, limit: int = 50
+    session: AsyncSession,
+    *,
+    limit: int = 50,
+    status: str | None = None,
+    rule: str | None = None,
+    drone_id: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
 ) -> Sequence[AlertRecord]:
+    stmt = select(AlertRecord)
+    if status == "active":
+        stmt = stmt.where(
+            AlertRecord.status.in_(("open", "acknowledged"))
+        )
+    elif status is not None:
+        stmt = stmt.where(AlertRecord.status == status)
+    if rule is not None:
+        stmt = stmt.where(AlertRecord.rule == rule)
+    if drone_id is not None:
+        stmt = stmt.where(AlertRecord.drone_id == drone_id)
+    if since is not None:
+        stmt = stmt.where(AlertRecord.triggered_at >= since)
+    if until is not None:
+        stmt = stmt.where(AlertRecord.triggered_at <= until)
+    stmt = stmt.order_by(
+        AlertRecord.triggered_at.desc(),
+        AlertRecord.alert_id.desc(),
+    ).limit(limit)
+    result = await session.execute(stmt)
+    return result.scalars().all()
+
+
+async def get_alert(
+    session: AsyncSession, alert_id: str
+) -> AlertRecord | None:
+    return await session.get(AlertRecord, alert_id)
+
+
+async def list_alert_events(
+    session: AsyncSession,
+    alert_id: str,
+    *,
+    limit: int = 100,
+) -> Sequence[AlertEvent]:
     stmt = (
-        select(AlertRecord)
+        select(AlertEvent)
+        .where(AlertEvent.alert_id == alert_id)
         .order_by(
-            AlertRecord.triggered_at.desc(),
-            AlertRecord.alert_id.desc(),
+            AlertEvent.occurred_at.desc(),
+            AlertEvent.event_id.desc(),
         )
         .limit(limit)
     )
     result = await session.execute(stmt)
-    return result.scalars().all()
+    return list(reversed(result.scalars().all()))
 
 
 async def acknowledge_alert(
@@ -439,27 +644,114 @@ async def acknowledge_alert(
     one request can transition the row from unacknowledged to
     acknowledged, and every retry returns that same audit record.
     """
-    row = await session.get(AlertRecord, alert_id)
+    row = await _alert_for_update(session, alert_id)
     if row is None:
         return None
+    if row.status == "resolved":
+        raise AlertStateConflict(
+            "resolved alerts must be reopened before acknowledgement"
+        )
     if row.acknowledged_at is None:
-        await session.execute(
-            update(AlertRecord)
-            .where(
-                AlertRecord.alert_id == alert_id,
-                AlertRecord.acknowledged_at.is_(None),
-            )
-            .values(
-                acknowledged_at=now or datetime.now(tz=timezone.utc),
-                acknowledged_by=acknowledged_by.strip()[:128],
-                acknowledgement_note=note.strip()[:1000] or None,
-            )
+        transition_at = now or datetime.now(tz=timezone.utc)
+        transition_at = _as_utc(transition_at)
+        actor = acknowledged_by.strip()[:128]
+        clean_note = note.strip()[:1000] or None
+        row.acknowledged_at = transition_at
+        row.acknowledged_by = actor
+        row.acknowledgement_note = clean_note
+        row.status = "acknowledged"
+        row.updated_at = transition_at
+        _append_alert_event(
+            session,
+            alert_id,
+            action="acknowledged",
+            actor=actor,
+            note=clean_note,
+            occurred_at=transition_at,
         )
         await session.commit()
-        row = await session.get(AlertRecord, alert_id)
-        if row is None:  # pragma: no cover
-            return None
         await session.refresh(row)
+    return row
+
+
+async def resolve_alert(
+    session: AsyncSession,
+    alert_id: str,
+    *,
+    resolved_by: str,
+    note: str = "",
+    now: datetime | None = None,
+) -> AlertRecord | None:
+    """Resolve an alert.  Repeating the same call is idempotent."""
+    row = await _alert_for_update(session, alert_id)
+    if row is None:
+        return None
+    if row.resolved_at is not None:
+        return row
+
+    transition_at = _as_utc(now or datetime.now(tz=timezone.utc))
+    actor = resolved_by.strip()[:128]
+    clean_note = note.strip()[:1000] or None
+    row.resolved_at = transition_at
+    row.resolved_by = actor
+    row.resolution_note = clean_note
+    row.status = "resolved"
+    row.updated_at = transition_at
+    _append_alert_event(
+        session,
+        alert_id,
+        action="resolved",
+        actor=actor,
+        note=clean_note,
+        occurred_at=transition_at,
+    )
+    await session.commit()
+    await session.refresh(row)
+    return row
+
+
+async def reopen_alert(
+    session: AsyncSession,
+    alert_id: str,
+    *,
+    reopened_by: str,
+    note: str = "",
+    now: datetime | None = None,
+) -> AlertRecord | None:
+    """Reopen a resolved alert and start a fresh acknowledgement cycle."""
+    row = await _alert_for_update(session, alert_id)
+    if row is None:
+        return None
+    if row.status != "resolved":
+        raise AlertStateConflict("only resolved alerts can be reopened")
+
+    transition_at = _as_utc(now or datetime.now(tz=timezone.utc))
+    actor = reopened_by.strip()[:128]
+    clean_note = note.strip()[:1000] or None
+    previous_resolution_note = row.resolution_note
+    row.status = "open"
+    row.acknowledged_at = None
+    row.acknowledged_by = None
+    row.acknowledgement_note = None
+    row.resolved_at = None
+    row.resolved_by = None
+    row.resolution_note = None
+    row.reopen_count = (row.reopen_count or 0) + 1
+    row.updated_at = transition_at
+    _append_alert_event(
+        session,
+        alert_id,
+        action="reopened",
+        actor=actor,
+        note=clean_note,
+        occurred_at=transition_at,
+        detail={
+            "automatic": False,
+            "previous_resolution_note": previous_resolution_note,
+        },
+    )
+    await session.commit()
+    await session.refresh(row)
     return row
 
 

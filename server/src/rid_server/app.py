@@ -81,7 +81,7 @@ def create_app() -> FastAPI:
     request_metrics = RequestMetrics()
     app = FastAPI(
         title="RID Server",
-        version="0.4.0",
+        version="0.5.0",
         lifespan=lifespan,
     )
     app.state.settings = settings

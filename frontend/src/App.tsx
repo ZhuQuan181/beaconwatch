@@ -23,6 +23,9 @@ export function App() {
     connected,
     error,
     acknowledgeAlert,
+    resolveAlert,
+    reopenAlert,
+    loadAlertHistory,
   } = useObservationsStream();
   // Stations come from the presence registry (server is the source of
   // truth for which stations exist).  The per-station "online" dot is
@@ -240,6 +243,9 @@ export function App() {
             alerts={alerts}
             onSelectDrone={setSelected}
             onAcknowledge={acknowledgeAlert}
+            onResolve={resolveAlert}
+            onReopen={reopenAlert}
+            onLoadHistory={loadAlertHistory}
           />
         </div>
 

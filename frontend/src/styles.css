@@ -399,6 +399,35 @@ header.topbar .stat--replay {
   font-size: 12px;
   color: #58627a;
 }
+.alert-filters {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 7px;
+}
+.alert-filters button {
+  padding: 3px 7px;
+  border: 1px solid #2a3142;
+  border-radius: 3px;
+  background: #11151e;
+  color: #7f899b;
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+.alert-filters button span {
+  color: #5d687a;
+  font-variant-numeric: tabular-nums;
+}
+.alert-filters button:hover {
+  border-color: #3b465b;
+  color: #b7c0cf;
+}
+.alert-filters button.active {
+  border-color: #35556b;
+  background: #172633;
+  color: #8fd8ff;
+}
+.alert-filters button.active span { color: #6da8c5; }
 .alert-tools {
   display: flex;
   gap: 6px;
@@ -444,6 +473,11 @@ header.topbar .stat--replay {
   flex-direction: column;
   gap: 5px;
 }
+.alert-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
 .alert-row {
   display: grid;
   grid-template-columns: 3px 1fr;
@@ -457,8 +491,15 @@ header.topbar .stat--replay {
 .alert-row:hover { background: #1b2130; }
 .alert-row.sev-critical { background: rgba(255, 59, 48, .09); }
 .alert-row.sev-critical:hover { background: rgba(255, 59, 48, .14); }
-.alert-row.acked { opacity: .68; }
-.alert-row.acked .alert-mark { background: #35b66f; }
+.alert-row.status-acknowledged { opacity: .78; }
+.alert-row.status-acknowledged .alert-mark { background: #35b66f; }
+.alert-row.status-resolved { opacity: .72; }
+.alert-row.status-resolved .alert-mark { background: #547062; }
+.alert-row.sev-critical.status-resolved,
+.alert-row.sev-critical.status-resolved:hover {
+  background: #141922;
+}
+.alert-row.status-resolved .alert-line-2 { color: #7f8a9a; }
 
 .alert-mark {
   border-radius: 2px;
@@ -491,6 +532,17 @@ header.topbar .stat--replay {
   border: 1px solid #2a3142;
   border-radius: 2px;
 }
+.alert-status {
+  flex: 0 0 auto;
+  font-size: 9.5px;
+  padding: 0 4px;
+  border-radius: 2px;
+  color: #9aa3b2;
+  background: #222937;
+}
+.alert-status.status-open { color: #f0c665; background: rgba(240, 180, 41, .1); }
+.alert-status.status-acknowledged { color: #7fcca2; background: rgba(53, 182, 111, .1); }
+.alert-status.status-resolved { color: #89958f; background: rgba(84, 112, 98, .14); }
 .alert-row.sev-critical .alert-rule {
   color: #ff8b84;
   border-color: #7d2420;
@@ -511,17 +563,32 @@ header.topbar .stat--replay {
   margin-top: 1px;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 3px;
   min-width: 0;
 }
-.alert-ack-meta {
+.alert-ack-meta,
+.alert-resolve-meta {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 1 1 150px;
+  min-width: 0;
+}
+.alert-ack-meta {
   color: #64b98a;
 }
-.alert-ack-button {
+.alert-resolve-meta {
+  color: #82978b;
+}
+.alert-actions {
+  display: flex;
+  gap: 4px;
   margin-left: auto;
+  flex: 0 0 auto;
+}
+.alert-action-button,
+.alert-history-button {
   padding: 2px 7px;
   border: 1px solid #35556b;
   border-radius: 3px;
@@ -531,14 +598,85 @@ header.topbar .stat--replay {
   font-size: 10px;
   cursor: pointer;
 }
-.alert-ack-button:hover:not(:disabled) {
+.alert-action-button:hover:not(:disabled),
+.alert-history-button:hover {
   border-color: #5cc8ff;
   background: #1d3344;
 }
-.alert-ack-button:disabled {
+.alert-action-button.action-resolve {
+  border-color: #3f604d;
+  background: #17241c;
+  color: #8fd4a8;
+}
+.alert-action-button.action-resolve:hover:not(:disabled) {
+  border-color: #60b47d;
+  background: #1d3124;
+}
+.alert-action-button.action-reopen {
+  border-color: #65533a;
+  background: #282116;
+  color: #e8c68d;
+}
+.alert-action-button.action-reopen:hover:not(:disabled) {
+  border-color: #c79b52;
+  background: #342a1b;
+}
+.alert-history-button {
+  border-color: #323a4b;
+  background: #151a24;
+  color: #8994a8;
+}
+.alert-action-button:disabled {
   color: #66717f;
   cursor: wait;
 }
+.alert-history {
+  margin: -1px 0 2px 12px;
+  padding: 7px 9px;
+  border-left: 1px solid #2a3142;
+  color: #738094;
+  font-size: 10px;
+  line-height: 1.5;
+}
+.alert-history ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.alert-history li {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+.history-action {
+  flex: 0 0 54px;
+  color: #aeb8c8;
+}
+.history-actor {
+  flex: 0 1 auto;
+  color: #7fcca2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.history-time {
+  flex: 0 0 auto;
+  color: #596477;
+  font-variant-numeric: tabular-nums;
+}
+.history-note {
+  flex: 1 1 100px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #8d98aa;
+}
+.alert-history-error { color: #ff8b84; }
 
 /* ── Ghost drone marker in the sidebar ───────────────────────────
    Same red as the map dot, so the list and the map agree on which

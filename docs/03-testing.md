@@ -41,7 +41,10 @@ PYTHONPATH=server/src .venv/bin/python -m pytest -q server/tests
 - 禁飞区/限高/未识别告警；
 - 稳定 alert ID；
 - 告警账本 upsert、重复触发计数、乱序触发不倒退时间；
-- 告警确认幂等、未知告警 404、确认状态 WebSocket 广播；
+- 告警 open/acknowledged/resolved 生命周期、解决幂等和非法状态转换；
+- 告警确认、解决、重开、未知告警 404 和状态变更 WebSocket 广播；
+- 已解决告警再次触发时自动重开、重开计数和系统审计事件；
+- 告警状态/规则/无人机/时间窗口筛选、事件时间线；
 - 告警落库失败时仍下发实时告警；
 - health/readiness/metrics；
 - MQTT TLS 上下文与证书配对校验；
@@ -65,7 +68,8 @@ make e2e
 
 前置是 `make up`。脚本使用真实 EMQX、TimescaleDB、MqttSubscriber、repository
 和 FastAPI 路由，验证官方帧最终能通过 HTTP 查询，并确认未识别告警已落库、
-首次确认审计字段可读且重复确认不会覆盖原记录。
+首次确认审计字段可读且重复确认不会覆盖原记录。脚本继续执行解决、重新打开
+和再次解决，并验证完整审计事件序列可从真实 PostgreSQL 读回。
 
 ### 前端
 
@@ -89,6 +93,9 @@ project、独立端口和独立数据卷，不要对现有生产卷执行 `down 
 2. `/health/ready` 返回 200；
 3. `/metrics` 显示 MQTT 已连接；
 4. 测试容器和测试卷可以独立删除。
+
+升级发布还需用独立的 0.4 schema 数据库验证 `0005 → 0006`：原有确认状态
+应回填为 `acknowledged`，并为旧告警生成触发/确认审计事件。
 
 ## 3. 官方 golden vectors
 

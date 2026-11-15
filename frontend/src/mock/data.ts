@@ -7,6 +7,7 @@
  */
 import type {
   Alert,
+  AlertEvent,
   DroneObservation,
   DroneSummary,
   GeofenceZone,
@@ -143,6 +144,7 @@ export const zones: GeofenceZone[] = [
 
 export const observations: DroneObservation[] = [];
 export const alerts: Alert[] = [];
+export const alertEvents: Record<string, AlertEvent[]> = {};
 
 let sequence = 0;
 let liveTick = 0;
@@ -202,6 +204,9 @@ export function seedHistory(pointsPerDrone = 90, intervalMs = 2000): void {
     (a, b) => Date.parse(b.received_at) - Date.parse(a.received_at),
   );
 
+  const firstAt = new Date(now - 42_000).toISOString();
+  const secondAt = new Date(now - 96_000).toISOString();
+  const thirdAt = new Date(now - 155_000).toISOString();
   alerts.push(
     {
       alert_id: "alert-mock-001",
@@ -210,9 +215,12 @@ export function seedHistory(pointsPerDrone = 90, intervalMs = 2000): void {
       drone_id: "FAA-1583A2",
       message: "Drone entered Alcatraz No-Fly zone",
       detail: { zone_id: "ZONE-ALCATRAZ", zone_name: "Alcatraz No-Fly" },
-      at: new Date(now - 42_000).toISOString(),
-      first_seen_at: new Date(now - 42_000).toISOString(),
+      at: firstAt,
+      first_seen_at: firstAt,
       trigger_count: 1,
+      status: "open",
+      updated_at: firstAt,
+      reopen_count: 0,
     },
     {
       alert_id: "alert-mock-002",
@@ -221,9 +229,15 @@ export function seedHistory(pointsPerDrone = 90, intervalMs = 2000): void {
       drone_id: "UNKNOWN-7C1A",
       message: "Unidentified drone broadcasting without a Remote ID",
       detail: { station_id: "ST-03" },
-      at: new Date(now - 96_000).toISOString(),
-      first_seen_at: new Date(now - 96_000).toISOString(),
-      trigger_count: 1,
+      at: secondAt,
+      first_seen_at: secondAt,
+      trigger_count: 2,
+      status: "acknowledged",
+      updated_at: new Date(now - 78_000).toISOString(),
+      acknowledged_at: new Date(now - 78_000).toISOString(),
+      acknowledged_by: "demo-operator",
+      acknowledgement_note: "正在用测向仪复核",
+      reopen_count: 0,
     },
     {
       alert_id: "alert-mock-003",
@@ -232,11 +246,65 @@ export function seedHistory(pointsPerDrone = 90, intervalMs = 2000): void {
       drone_id: "FAA-6D20B4",
       message: "Drone above 300 m advisory ceiling",
       detail: { altitude_m: 330, ceiling_m: 300 },
-      at: new Date(now - 155_000).toISOString(),
-      first_seen_at: new Date(now - 155_000).toISOString(),
+      at: thirdAt,
+      first_seen_at: thirdAt,
       trigger_count: 1,
+      status: "resolved",
+      updated_at: new Date(now - 120_000).toISOString(),
+      resolved_at: new Date(now - 120_000).toISOString(),
+      resolved_by: "demo-operator",
+      resolution_note: "已离开告警高度",
+      reopen_count: 0,
     },
   );
+  alertEvents["alert-mock-001"] = [
+    {
+      event_id: "event-mock-001-triggered",
+      alert_id: "alert-mock-001",
+      action: "triggered",
+      actor: "system",
+      at: firstAt,
+      detail: { rule: "geofence" },
+    },
+  ];
+  alertEvents["alert-mock-002"] = [
+    {
+      event_id: "event-mock-002-triggered",
+      alert_id: "alert-mock-002",
+      action: "triggered",
+      actor: "system",
+      at: secondAt,
+      detail: { rule: "unidentified" },
+    },
+    {
+      event_id: "event-mock-002-acknowledged",
+      alert_id: "alert-mock-002",
+      action: "acknowledged",
+      actor: "demo-operator",
+      note: "正在用测向仪复核",
+      at: new Date(now - 78_000).toISOString(),
+      detail: {},
+    },
+  ];
+  alertEvents["alert-mock-003"] = [
+    {
+      event_id: "event-mock-003-triggered",
+      alert_id: "alert-mock-003",
+      action: "triggered",
+      actor: "system",
+      at: thirdAt,
+      detail: { rule: "altitude" },
+    },
+    {
+      event_id: "event-mock-003-resolved",
+      alert_id: "alert-mock-003",
+      action: "resolved",
+      actor: "demo-operator",
+      note: "已离开告警高度",
+      at: new Date(now - 120_000).toISOString(),
+      detail: {},
+    },
+  ];
 }
 
 export function droneSummaries(): DroneSummary[] {
@@ -279,6 +347,7 @@ export function nextLiveFrames(): WsFrame[] {
   if (observations.length > 3000) observations.length = 3000;
 
   if (liveTick % 9 === 0) {
+    const alertAt = new Date().toISOString();
     const alert: Alert = {
       alert_id: `alert-live-${liveTick}`,
       rule: "geofence",
@@ -286,10 +355,25 @@ export function nextLiveFrames(): WsFrame[] {
       drone_id: "FAA-1583A2",
       message: "Drone entered Downtown Warning zone",
       detail: { zone_id: "ZONE-DOWNTOWN", zone_name: "Downtown Warning" },
-      at: new Date().toISOString(),
+      at: alertAt,
+      first_seen_at: alertAt,
+      trigger_count: 1,
+      status: "open",
+      updated_at: alertAt,
+      reopen_count: 0,
     };
     alerts.unshift(alert);
     if (alerts.length > 100) alerts.length = 100;
+    alertEvents[alert.alert_id] = [
+      {
+        event_id: `event-${alert.alert_id}-triggered`,
+        alert_id: alert.alert_id,
+        action: "triggered",
+        actor: "system",
+        at: alert.at,
+        detail: { rule: alert.rule },
+      },
+    ];
     frames.push({ type: "alert", data: alert });
   }
 

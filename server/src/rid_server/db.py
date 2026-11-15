@@ -17,6 +17,7 @@ from datetime import datetime
 from sqlalchemy import (
     JSON,
     BigInteger,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -98,12 +99,12 @@ class GeofenceZone(Base):
 
 
 class AlertRecord(Base):
-    """Persistent alert ledger with an operator acknowledgement trail.
+    """Persistent alert ledger with an operator workflow trail.
 
     Rule evaluation is still an in-process, observation-derived operation,
-    but the resulting alert and its first acknowledgement are operational
-    records.  They must survive a process restart and remain queryable for
-    an audit, unlike the old bounded in-memory ring.
+    but the resulting alert, its current lifecycle state and every operator
+    transition are operational records.  They must survive a process restart
+    and remain queryable for an audit, unlike the old bounded in-memory ring.
     """
 
     __tablename__ = "alerts"
@@ -130,16 +131,74 @@ class AlertRecord(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="open",
+        server_default="open",
+    )
     acknowledged_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True)
     )
     acknowledged_by: Mapped[str | None] = mapped_column(String(128))
     acknowledgement_note: Mapped[str | None] = mapped_column(Text)
+    resolved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    resolved_by: Mapped[str | None] = mapped_column(String(128))
+    resolution_note: Mapped[str | None] = mapped_column(Text)
+    reopen_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
 
     __table_args__ = (
+        CheckConstraint(
+            "status IN ('open', 'acknowledged', 'resolved')",
+            name="ck_alerts_status",
+        ),
         Index("ix_alerts_triggered_at", "triggered_at"),
         Index("ix_alerts_drone_id", "drone_id"),
         Index("ix_alerts_acknowledged_at", "acknowledged_at"),
+        Index("ix_alerts_status_triggered", "status", "triggered_at"),
+        Index("ix_alerts_drone_triggered", "drone_id", "triggered_at"),
+    )
+
+
+class AlertEvent(Base):
+    """Immutable operator/system transition history for an alert."""
+
+    __tablename__ = "alert_events"
+
+    event_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    alert_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("alerts.alert_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    action: Mapped[str] = mapped_column(String(24), nullable=False)
+    actor: Mapped[str | None] = mapped_column(String(128))
+    note: Mapped[str | None] = mapped_column(Text)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    detail: Mapped[dict] = mapped_column(
+        JSONB().with_variant(JSON(), "sqlite"),
+        nullable=False,
+        default=dict,
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_alert_events_alert_occurred",
+            "alert_id",
+            "occurred_at",
+        ),
     )
 
 

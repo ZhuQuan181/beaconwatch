@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.5.0 - 2026-11-15
+
+### Added
+
+- Complete alert lifecycle with `open`, `acknowledged` and `resolved` states,
+  including operator resolution and reopen actions.
+- Immutable `alert_events` audit ledger recording every trigger,
+  acknowledgement, resolution and reopen with actor, note and timestamp.
+- `GET /alerts/{alert_id}` and `GET /alerts/{alert_id}/events` endpoints.
+- Alert filters for lifecycle status, rule, drone and triggered-at window;
+  `status=active` selects open plus acknowledged alerts.
+- Automatic reopening when a resolved alert's rule fires again, with a system
+  audit event and recurrence count.
+- Dashboard lifecycle filters, resolve/reopen controls and expandable audit
+  timelines; the static demo implements the matching mock contract.
+
+### Changed
+
+- Alert recurrence after resolution starts a fresh handling cycle and clears
+  the prior cycle's live acknowledgement/resolution fields while preserving
+  its immutable event history.
+- Alert records now expose `status`, `updated_at`, resolution fields and
+  `reopen_count`; stale REST/WebSocket responses cannot roll newer state back.
+- Upgrading an existing 0.4 database backfills legacy triggers and
+  acknowledgements into the new audit timeline.
+- Real-chain E2E verification now exercises acknowledge, resolve, audit,
+  reopen and final resolution through PostgreSQL and HTTP.
+- Repository/package metadata advanced to 0.5.0.
+
 ## 0.4.0 - 2026-11-15
 
 ### Added

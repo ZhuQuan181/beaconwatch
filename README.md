@@ -35,8 +35,9 @@ run the real edge/MQTT/database/API stack.
 - **Operations:** optional Bearer-token auth, request IDs, security headers,
   gzip, live/ready health checks, Prometheus text metrics, automatic Alembic
   migrations in the server container.
-- **Alert workflow:** durable alert ledger with recurrence counts, first-operator
-  acknowledgement, handler/note audit fields and live WebSocket state updates.
+- **Alert workflow:** durable open/acknowledged/resolved state machine,
+  automatic recurrence reopening, operator resolution and reopen actions,
+  immutable audit events, status/rule/drone filters and live WebSocket updates.
 - **Dashboard:** heartbeat-monitored live WebSocket feed, timeout/retry-aware
   HTTP client, replay timeline, stations and coverage, geofences, alerts,
   unidentified-drone highlighting.
@@ -99,7 +100,8 @@ untrusted network you still need:
 - HTTPS/WSS termination at a reverse proxy;
 - secret management and non-default database credentials;
 - a shared WebSocket fan-out layer if running multiple server replicas;
-- notification delivery, alert retention policy and full role-based audit.
+- notification delivery, alert retention policy and full role-based access
+  control beyond the alert audit trail.
 
 The current WebSocket fan-out is in-process, so a multi-replica server requires
 a shared bus such as Redis/NATS. See `docs/01-architecture.md` and

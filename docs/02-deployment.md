@@ -60,7 +60,7 @@ VITE_API_TOKEN="$RID_API_TOKEN" npm run build
 `Sec-WebSocket-Protocol` 传递 `bearer.<token>`。共享 token 只适合单租户/
 受信网络；公网部署仍应使用反向代理、身份网关和 TLS。
 
-告警查询与确认接口使用同一鉴权：
+告警查询与生命周期接口使用同一鉴权：
 
 ```bash
 curl -s -H "Authorization: Bearer $RID_API_TOKEN" \
@@ -70,10 +70,26 @@ curl -s -X POST \
   -H "Content-Type: application/json" \
   -d '{"acknowledged_by":"operator-7","note":"已派发现场核查"}' \
   "http://localhost:8000/alerts/$ALERT_ID/ack"
+
+curl -s -X POST \
+  -H "Authorization: Bearer $RID_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"resolved_by":"operator-7","note":"现场核查完成"}' \
+  "http://localhost:8000/alerts/$ALERT_ID/resolve"
+
+curl -s -X POST \
+  -H "Authorization: Bearer $RID_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"reopened_by":"operator-7","note":"发现新的航迹"}' \
+  "http://localhost:8000/alerts/$ALERT_ID/reopen"
+
+curl -s -H "Authorization: Bearer $RID_API_TOKEN" \
+  "http://localhost:8000/alerts/$ALERT_ID/events"
 ```
 
-首次确认会写入操作员、时间和备注；重复请求返回同一确认记录，不会覆盖原始
-审计信息。
+`status=active` 可以只查询未关闭告警，也支持按 `rule`、`drone_id`、`from`
+和 `to` 过滤。首次确认和解决均写入操作员、时间与备注；重复确认或解决返回
+同一记录。只有已解决告警可以重新打开，每次状态变化都会进入审计时间线。
 
 ## 3. 边缘节点
 
@@ -155,7 +171,7 @@ receiver、pipeline、EMQX、数据库和 FastAPI，最后通过 HTTP 检查协�
 升级镜像：
 
 ```bash
-docker build -t beaconwatch-server:0.4.0 ./server
+docker build -t beaconwatch-server:0.5.0 ./server
 docker compose -f server/docker-compose.yml up -d --build rid-server
 ```
 

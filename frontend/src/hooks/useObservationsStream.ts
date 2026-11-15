@@ -8,11 +8,16 @@
  * longer than the last 200 — old data belongs to the REST endpoint.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Alert, DroneObservation, WsFrame } from "../types";
+import type {
+  Alert,
+  AlertEvent,
+  DroneObservation,
+  WsFrame,
+} from "../types";
 import { api, getApiToken } from "../api/client";
 
 const MAX_RETAIN = 200;
-const MAX_ALERTS = 100;
+const MAX_ALERTS = 200;
 const WS_STALE_MS = 45_000;
 
 export interface StreamState {
@@ -37,6 +42,20 @@ export interface ObservationStream extends StreamState {
     acknowledgedBy: string,
     note?: string,
   ) => Promise<Alert>;
+  /** Close an alert and persist the operator's resolution. */
+  resolveAlert: (
+    alertId: string,
+    resolvedBy: string,
+    note?: string,
+  ) => Promise<Alert>;
+  /** Reopen a resolved alert as a new active handling cycle. */
+  reopenAlert: (
+    alertId: string,
+    reopenedBy: string,
+    note?: string,
+  ) => Promise<Alert>;
+  /** Load the immutable lifecycle audit trail for one alert. */
+  loadAlertHistory: (alertId: string) => Promise<AlertEvent[]>;
 }
 
 function mergeObservationRows(
@@ -55,6 +74,21 @@ function mergeObservationRows(
 
 function mergeAlert(current: Alert | undefined, incoming: Alert): Alert {
   if (!current) return incoming;
+  const currentVersion = Date.parse(current.updated_at ?? current.at);
+  const incomingVersion = Date.parse(incoming.updated_at ?? incoming.at);
+  if (
+    Number.isFinite(currentVersion) &&
+    Number.isFinite(incomingVersion) &&
+    incomingVersion < currentVersion
+  ) {
+    return {
+      ...current,
+      trigger_count: Math.max(
+        current.trigger_count ?? 1,
+        incoming.trigger_count ?? 1,
+      ),
+    };
+  }
   const currentAt = Date.parse(current.at);
   const incomingAt = Date.parse(incoming.at);
   const latestAt =
@@ -74,13 +108,21 @@ function mergeAlert(current: Alert | undefined, incoming: Alert): Alert {
       incoming.trigger_count ?? 1,
     ),
   };
-  // There is no reopen flow yet, so an acknowledgement is monotonic.
-  if (current.acknowledged_at) {
-    merged.acknowledged_at = current.acknowledged_at;
-    merged.acknowledged_by = current.acknowledged_by;
-    merged.acknowledgement_note = current.acknowledgement_note;
-  }
   return merged;
+}
+
+function replaceAlert(current: StreamState, updated: Alert): StreamState {
+  const exists = current.alerts.some(
+    (alert) => alert.alert_id === updated.alert_id,
+  );
+  const alerts = exists
+    ? current.alerts.map((alert) =>
+        alert.alert_id === updated.alert_id
+          ? mergeAlert(alert, updated)
+          : alert,
+      )
+    : [updated, ...current.alerts].slice(0, MAX_ALERTS);
+  return { ...current, alerts };
 }
 
 export function useObservationsStream(
@@ -114,18 +156,39 @@ export function useObservationsStream(
         note,
       });
       setState((current) => {
-        const exists = current.alerts.some(
-          (alert) => alert.alert_id === updated.alert_id,
-        );
-        const alerts = exists
-          ? current.alerts.map((alert) =>
-              alert.alert_id === updated.alert_id ? updated : alert,
-            )
-          : [updated, ...current.alerts].slice(0, MAX_ALERTS);
-        return { ...current, alerts };
+        return replaceAlert(current, updated);
       });
       return updated;
     },
+    [],
+  );
+
+  const resolveAlert = useCallback(
+    async (alertId: string, resolvedBy: string, note = "") => {
+      const updated = await api.resolveAlert(alertId, {
+        resolved_by: resolvedBy,
+        note,
+      });
+      setState((current) => replaceAlert(current, updated));
+      return updated;
+    },
+    [],
+  );
+
+  const reopenAlert = useCallback(
+    async (alertId: string, reopenedBy: string, note = "") => {
+      const updated = await api.reopenAlert(alertId, {
+        reopened_by: reopenedBy,
+        note,
+      });
+      setState((current) => replaceAlert(current, updated));
+      return updated;
+    },
+    [],
+  );
+
+  const loadAlertHistory = useCallback(
+    (alertId: string) => api.listAlertEvents(alertId),
     [],
   );
 
@@ -135,7 +198,7 @@ export function useObservationsStream(
   useEffect(() => {
     const controller = new AbortController();
     api
-      .listAlerts(50, controller.signal)
+      .listAlerts(200, controller.signal)
       .then((rows) => {
         if (!rows.length || controller.signal.aborted) return;
         setState((s) => {
@@ -306,5 +369,11 @@ export function useObservationsStream(
     };
   }, [clearWatchdog, connect]);
 
-  return { ...state, acknowledgeAlert };
+  return {
+    ...state,
+    acknowledgeAlert,
+    resolveAlert,
+    reopenAlert,
+    loadAlertHistory,
+  };
 }
