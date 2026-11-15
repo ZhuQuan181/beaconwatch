@@ -107,7 +107,7 @@ class StationInfo(BaseModel):
     station_id: str = Field(min_length=1, max_length=64)
     location: Position
     name: str | None = Field(default=None, max_length=128)
-    firmware_version: str = Field(default="0.8.0", max_length=32)
+    firmware_version: str = Field(default="0.9.0", max_length=32)
     capabilities: list[str] = Field(default_factory=lambda: ["ble", "wifi_nan"])
 
 

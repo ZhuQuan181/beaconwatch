@@ -1,4 +1,4 @@
-.PHONY: help up down logs install test test-wire e2e lint clean reset
+.PHONY: help up down logs install test test-wire e2e e2e-multi lint clean reset
 
 SHELL := /bin/bash
 VENV ?= .venv
@@ -13,12 +13,13 @@ COMPOSE := docker compose -f server/docker-compose.yml
 
 help:
 	@echo "BeaconWatch — real-time Remote ID monitoring"
-	@echo "  make up     - start stack (TimescaleDB + EMQX + server)"
+	@echo "  make up     - start stack (TimescaleDB + EMQX + Redis + server)"
 	@echo "  make down   - stop"
 	@echo "  make logs   - tail logs"
 	@echo "  make install- create .venv and install Python/frontend deps"
 	@echo "  make test   - unit tests (edge + server) + wire contract"
 	@echo "  make e2e    - real end-to-end: edge -> MQTT -> server -> DB -> HTTP"
+	@echo "  make e2e-multi - two API replicas + Redis + MQTT shared subscription"
 	@echo "  make lint   - linters"
 	@echo "  make clean  - remove local caches/artifacts (keeps database data)"
 	@echo "  make reset  - DESTRUCTIVE: stop stack and delete its database volume"
@@ -66,6 +67,13 @@ e2e:
 	RID_DB_PORT=$${RID_DB_PORT:-5433} \
 	RID_MQTT_HOST=$${RID_MQTT_HOST:-127.0.0.1} \
 	PYTHONPATH=$(SRC_PATH):edge/tests $(PYTHON) scripts/e2e_chain.py
+
+e2e-multi:
+	@test -x $(PYTHON) || { echo "run 'make install' first"; exit 1; }
+	RID_DB_HOST=$${RID_DB_HOST:-127.0.0.1} \
+	RID_DB_PORT=$${RID_DB_PORT:-5433} \
+	RID_MQTT_HOST=$${RID_MQTT_HOST:-127.0.0.1} \
+	PYTHONPATH=$(SRC_PATH) $(PYTHON) scripts/e2e_multireplica.py
 
 lint:
 	$(PYTHON) -m ruff check edge server tests scripts

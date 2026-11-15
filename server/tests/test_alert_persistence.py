@@ -82,6 +82,35 @@ async def test_upsert_alert_does_not_move_trigger_time_backwards(session):
     assert as_utc(row.triggered_at) == first_at
 
 
+async def test_upsert_alert_dedup_window_is_durable(session):
+    first_at = datetime(2026, 11, 15, 8, 0, tzinfo=timezone.utc)
+
+    first = await upsert_alert(
+        session,
+        make_alert(at=first_at),
+        dedup_seconds=120,
+    )
+    duplicate = await upsert_alert(
+        session,
+        make_alert(at=first_at + timedelta(seconds=30)),
+        dedup_seconds=120,
+    )
+    recurrence = await upsert_alert(
+        session,
+        make_alert(at=first_at + timedelta(seconds=121)),
+        dedup_seconds=120,
+    )
+
+    assert first is not None
+    assert duplicate is None
+    assert recurrence is not None
+    assert recurrence.trigger_count == 2
+    assert as_utc(recurrence.triggered_at) == first_at + timedelta(
+        seconds=121
+    )
+    assert len(await list_alerts(session)) == 1
+
+
 async def test_acknowledge_alert_is_idempotent(session):
     first_at = datetime(2026, 11, 15, 8, 0, tzinfo=timezone.utc)
     ack_at = first_at + timedelta(minutes=1)
@@ -546,6 +575,31 @@ async def test_alert_hook_persists_before_broadcast(db_engine):
     assert frame["kind"] == "alert"
     assert frame["data"]["alert_id"] == alert.alert_id
     assert frame["data"]["trigger_count"] == 1
+
+
+async def test_alert_hook_suppresses_cross_replica_duplicate(db_engine):
+    bus = ObservationBus()
+    settings = Settings()
+    subscriber = MqttSubscriber(settings)
+    set_subscriber_bus_hook(subscriber, bus, AlertRing(), settings=settings)
+    first_at = datetime(2026, 11, 15, 8, 0, tzinfo=timezone.utc)
+
+    async with bus.subscribe() as queue:
+        await subscriber.on_alert(make_alert(at=first_at))
+        first = await asyncio.wait_for(queue.get(), timeout=1.0)
+        await subscriber.on_alert(
+            make_alert(at=first_at + timedelta(seconds=30))
+        )
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(queue.get(), timeout=0.1)
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with factory() as session:
+        rows = await list_alerts(session)
+
+    assert first["data"]["trigger_count"] == 1
+    assert len(rows) == 1
+    assert rows[0].trigger_count == 1
 
 
 async def test_alert_persistence_failure_still_broadcasts(

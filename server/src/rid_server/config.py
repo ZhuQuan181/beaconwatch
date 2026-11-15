@@ -1,11 +1,20 @@
 """Application settings, loaded once at import time."""
 from __future__ import annotations
 
+import os
+import re
+import socket
 from functools import lru_cache
 from urllib.parse import urlparse
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _default_instance_id() -> str:
+    host = re.sub(r"[^A-Za-z0-9._-]", "-", socket.gethostname())
+    host = host.strip("-")[:48] or "server"
+    return f"{host}-{os.getpid()}"[:64]
 
 
 class Settings(BaseSettings):
@@ -67,7 +76,34 @@ class Settings(BaseSettings):
     mqtt_client_id: str = "rid-server"
     mqtt_obs_topic: str = "rid/v1/+/obs"
     mqtt_info_topic: str = "rid/v1/+/info"
+    # Optional MQTT shared-subscription group. Set the same non-empty
+    # value on every API replica so each published message is consumed
+    # by exactly one replica instead of every replica. Leave empty for
+    # a single-process deployment.
+    mqtt_shared_group: str = ""
     mqtt_qos: int = Field(default=1, ge=0, le=2)
+    # Unique per server process/replica.  Appended to the MQTT client id
+    # so scaling the API does not make replicas kick each other off the
+    # broker.  Defaults to the container/host name.
+    instance_id: str = Field(
+        default_factory=_default_instance_id,
+        max_length=64,
+    )
+
+    # ── Live WebSocket bus ──────────────────────────────────────────
+    # memory is correct for one API process.  redis enables cross-replica
+    # live fan-out while leaving ingest idempotent.
+    bus_backend: str = "memory"
+    redis_url: str = "redis://localhost:6379/0"
+    redis_channel: str = "beaconwatch:events"
+    redis_required: bool = False
+    redis_connect_timeout_s: float = Field(default=3.0, ge=0.1, le=30.0)
+    redis_publish_timeout_s: float = Field(default=1.0, ge=0.1, le=30.0)
+    # Upper bound for one idle Pub/Sub read. This is not a socket
+    # timeout: the connection itself stays open, while the listener
+    # wakes periodically to notice stop/disconnect requests.
+    redis_poll_timeout_s: float = Field(default=1.0, ge=0.05, le=5.0)
+    redis_reconnect_max_s: float = Field(default=30.0, ge=1.0, le=300.0)
 
     # ── Alert rules ─────────────────────────────────────────────────
     # Altitude ceiling in metres.  None disables the rule.
@@ -77,7 +113,11 @@ class Settings(BaseSettings):
     # Re-alert interval for the same (drone, rule, zone).  A drone
     # hovering in a no-fly zone emits 4 fixes/second; without this the
     # panel is unusable within a minute.
-    alert_dedup_seconds: float = 120.0
+    alert_dedup_seconds: float = Field(
+        default=120.0,
+        ge=0.0,
+        le=7 * 24 * 60 * 60,
+    )
     # Zero disables destructive cleanup.  Operators must opt in to a
     # retention policy because alert events are an audit trail.
     alert_retention_days: int = Field(default=0, ge=0, le=3650)
@@ -105,6 +145,29 @@ class Settings(BaseSettings):
     # ── Operational ────────────────────────────────────────────────
     log_level: str = "INFO"
     env: str = "dev"
+
+    @field_validator("instance_id", mode="before")
+    @classmethod
+    def normalize_instance_id(cls, value: object) -> str:
+        """Use a process-unique default when Compose passes an empty var."""
+
+        if value is None:
+            return _default_instance_id()
+        text = str(value).strip()
+        return text or _default_instance_id()
+
+    @field_validator("mqtt_shared_group")
+    @classmethod
+    def validate_shared_group(cls, value: str) -> str:
+        group = value.strip()
+        if not group:
+            return ""
+        if len(group) > 64 or not re.fullmatch(r"[A-Za-z0-9._-]+", group):
+            raise ValueError(
+                "RID_MQTT_SHARED_GROUP must be 1-64 characters from "
+                "A-Z, a-z, 0-9, '.', '_' or '-'"
+            )
+        return group
 
     @model_validator(mode="after")
     def validate_notification_config(self) -> Settings:
@@ -146,6 +209,42 @@ class Settings(BaseSettings):
     @property
     def notifications_enabled(self) -> bool:
         return bool(self.notify_webhook_url)
+
+    @property
+    def mqtt_client_identifier(self) -> str:
+        base = (self.mqtt_client_id or "rid-server").strip()
+        suffix = (self.instance_id or _default_instance_id()).strip()
+        value = f"{base}-{suffix}" if suffix else base
+        return value[:128]
+
+    @property
+    def mqtt_obs_subscription_topic(self) -> str:
+        return self._shared_topic(self.mqtt_obs_topic)
+
+    @property
+    def mqtt_info_subscription_topic(self) -> str:
+        return self._shared_topic(self.mqtt_info_topic)
+
+    def _shared_topic(self, topic: str) -> str:
+        if not self.mqtt_shared_group:
+            return topic
+        return f"$share/{self.mqtt_shared_group}/{topic}"
+
+    @model_validator(mode="after")
+    def validate_bus_config(self) -> Settings:
+        if self.bus_backend not in {"memory", "redis"}:
+            raise ValueError(
+                "RID_BUS_BACKEND must be either 'memory' or 'redis'"
+            )
+        if self.bus_backend == "redis":
+            parsed = urlparse(self.redis_url)
+            if parsed.scheme not in {"redis", "rediss"} or not parsed.netloc:
+                raise ValueError(
+                    "RID_REDIS_URL must be an absolute redis:// or rediss:// URL"
+                )
+            if not self.redis_channel.strip():
+                raise ValueError("RID_REDIS_CHANNEL must not be empty")
+        return self
 
 
 @lru_cache(maxsize=1)

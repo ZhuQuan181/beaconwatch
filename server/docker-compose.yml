@@ -37,6 +37,16 @@ services:
       timeout: 5s
       retries: 20
 
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   rid-server:
     build: .
     container_name: rid-server
@@ -46,12 +56,17 @@ services:
         condition: service_healthy
       emqx:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       RID_DB_HOST: timescaledb
       RID_DB_PORT: 5432
       RID_DB_NAME: rid
       RID_DB_USER: rid
       RID_DB_PASSWORD: rid_dev_password
+      RID_MIGRATION_MAX_ATTEMPTS: ${RID_MIGRATION_MAX_ATTEMPTS:-20}
+      RID_MIGRATION_RETRY_BASE_S: ${RID_MIGRATION_RETRY_BASE_S:-1}
+      RID_MIGRATION_RETRY_MAX_S: ${RID_MIGRATION_RETRY_MAX_S:-10}
       RID_MQTT_HOST: emqx
       RID_MQTT_PORT: 1883
       RID_MQTT_OBS_TOPIC: rid/v1/+/obs
@@ -60,6 +75,16 @@ services:
       RID_MQTT_CA_CERT: ${RID_MQTT_CA_CERT:-}
       RID_MQTT_CLIENT_CERT: ${RID_MQTT_CLIENT_CERT:-}
       RID_MQTT_CLIENT_KEY: ${RID_MQTT_CLIENT_KEY:-}
+      RID_INSTANCE_ID: ${RID_INSTANCE_ID:-}
+      RID_MQTT_SHARED_GROUP: ${RID_MQTT_SHARED_GROUP:-}
+      RID_BUS_BACKEND: ${RID_BUS_BACKEND:-memory}
+      RID_REDIS_URL: ${RID_REDIS_URL:-redis://redis:6379/0}
+      RID_REDIS_CHANNEL: ${RID_REDIS_CHANNEL:-beaconwatch:events}
+      RID_REDIS_REQUIRED: ${RID_REDIS_REQUIRED:-false}
+      RID_REDIS_CONNECT_TIMEOUT_S: ${RID_REDIS_CONNECT_TIMEOUT_S:-3}
+      RID_REDIS_PUBLISH_TIMEOUT_S: ${RID_REDIS_PUBLISH_TIMEOUT_S:-1}
+      RID_REDIS_POLL_TIMEOUT_S: ${RID_REDIS_POLL_TIMEOUT_S:-1}
+      RID_REDIS_RECONNECT_MAX_S: ${RID_REDIS_RECONNECT_MAX_S:-30}
       RID_API_TOKEN: ${RID_API_TOKEN:-}
       RID_AUTH_USERS_FILE: ${RID_AUTH_USERS_FILE:-}
       RID_AUTH_RELOAD_INTERVAL_S: ${RID_AUTH_RELOAD_INTERVAL_S:-5}

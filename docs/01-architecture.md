@@ -44,21 +44,23 @@ BeaconWatch 接收无人机广播的 Remote ID（ASTM F3411 / Open Drone ID）�
                            ▼
 ┌──────────────────────────── Server ──────────────────────────────────┐
 │                                                                      │
-│  MqttSubscriber                                                      │
+│  API replica 1..N                                                    │
+│  MqttSubscriber (shared subscription: one replica per message)        │
 │    ├─ Pydantic validation                                            │
-│    ├─ station heartbeat upsert                                      │
+│    ├─ station heartbeat upsert                                       │
 │    ├─ idempotent observation insert                                  │
-│    ├─ alert rules                                                    │
-│    └─ in-process ObservationBus ──────────────┐                      │
+│    ├─ alert rules + durable cross-replica dedup                      │
+│    └─ RedisObservationBus ────────────────────┐                      │
 │                          │                     │                      │
 │                          ▼                     ▼                      │
-│                    TimescaleDB          /ws/observations              │
-│                    observations,        WebSocket fan-out             │
-│                    alerts, drones,                                    │
-│                    stations, geofence_zones                          │
+│                    TimescaleDB          Redis Pub/Sub                 │
+│                    observations,        │                             │
+│                    alerts, drones,      ▼                             │
+│                    stations,       each replica's local fan-out       │
+│                    geofence_zones  └─> /ws/observations               │
 │                          │                                            │
 │                          ▼                                            │
-│                    FastAPI REST API                                    │
+│                    FastAPI REST API                                   │
 └──────────────────────────┬───────────────────────────────────────────┘
                            │ HTTP / WebSocket
                            ▼
@@ -67,9 +69,10 @@ BeaconWatch 接收无人机广播的 Remote ID（ASTM F3411 / Open Drone ID）�
 │ live map / drone list / replay timeline / alerts / station coverage   │
 └──────────────────────────────────────────────────────────────────────┘
 
-未使用：Redis、PostGIS、OIDC/JWT 身份提供方、MQTT ACL 配置、服务端多副本
-共享总线。具名 API key、RBAC、审计与 MQTT TLS 已实现；OIDC/多副本仍是
-公网生产部署前的剩余项。
+Redis 是可选的实时共享总线：单副本默认使用进程内 fan-out；多副本同时设置
+`RID_BUS_BACKEND=redis` 和同一 `RID_MQTT_SHARED_GROUP`。Redis Pub/Sub 只
+承载实时推送，不保存历史；客户端断线后通过 REST 回补。OIDC/JWT、MQTT ACL
+和 Redis 生产级 TLS/HA 仍未内置。
 ```
 
 ## 3. 已实现的协议链路
@@ -268,6 +271,28 @@ WebSocket 推送以下 frame：
 客户端可以发送 `{"type":"ping"}`，服务端回复 `{"type":"pong"}`。服务端按
 `RID_WS_PING_INTERVAL_S` 定时 ping，浏览器据此检测半开连接并重连。
 
+### 多副本与实时总线
+
+- 默认 `RID_BUS_BACKEND=memory` 只适用于单进程；它没有跨进程共享状态。
+- 多副本设置 `RID_BUS_BACKEND=redis` 后，任何副本产生的观测和告警 frame
+  都会发布到同一个 Redis channel，各副本再投递给自己的 WebSocket 客户端；
+  负载均衡器不要求 WebSocket 粘性会话。
+- `RID_MQTT_SHARED_GROUP` 在多副本间启用 MQTT shared subscription，让每条
+  MQTT 消息只被一个副本消费。默认留空以保持单副本行为。
+- MQTT 客户端 ID 自动追加 `<hostname>-<pid>` 实例后缀；即使 Compose 传入
+  空的 `RID_INSTANCE_ID`，副本也不会互相踢下线。
+- 告警去重不依赖进程内状态：数据库 `alerts.triggered_at` 是跨副本的发射
+  闸门，PostgreSQL 事务级 advisory lock 串行化同一 `alert_id` 的首次插入。
+  去重窗口内的重复候选不会增加 `trigger_count`、写审计或排队通知。
+- Redis 不可用时，发布失败会降级为当前副本本地 fan-out，并指数退避重连；
+  其他副本暂时收不到实时 frame，但 REST 历史仍然完整。
+- `RID_REDIS_REQUIRED=true` 不会让进程崩溃，而是让 `/health/ready` 返回
+  503，直到共享总线恢复。Redis Pub/Sub 是 at-most-once，不能替代数据库
+  或 durable outbox。
+- 每个副本都可以运行通知和保留 worker；通知通过带租约的行锁和
+  `SKIP LOCKED` 避免同一投递被并发处理。共享总线部署仍需要受控的 Redis
+  逻辑实例、访问控制和网络隔离。
+
 ## 7. 前端
 
 - WebSocket 只保留最近 200 条实时观测；
@@ -303,10 +328,12 @@ WebSocket 推送以下 frame：
 ## 9. 运维接口
 
 - `/health/live`：进程存活，不访问数据库；
-- `/health/ready`：执行 `SELECT 1`，数据库不可用返回 503；
+- `/health/ready`：执行 `SELECT 1`，数据库不可用返回 503；配置 Redis 总线
+  且 `RID_REDIS_REQUIRED=true` 时，Redis 未连接也会返回 503；
 - `/metrics`：MQTT 连接、接收/入库/重复/非法消息、重连、站点心跳、WS
   客户端/丢弃帧、HTTP 请求/耗时/状态码/鉴权失败、通知 outbox 各状态/
-  尝试/失败计数、worker 状态，以及保留任务删除数/失败数/最近成功时间。
+  尝试/失败计数、Redis 总线连接/重连/发布失败/远端 frame 计数、worker
+  状态，以及保留任务删除数/失败数/最近成功时间。
 
 ## 10. 安全现状与生产限制
 
@@ -318,7 +345,7 @@ WebSocket 推送以下 frame：
 2. HTTPS/WSS 反向代理；
 3. MQTT ACL、每站客户端证书/账号和 Broker 侧 TLS 配置；
 4. 密钥管理、数据库最小权限、非默认密码；
-5. 多副本时用 Redis/NATS 等共享总线替代进程内 `ObservationBus`；
+5. Redis 的生产级 ACL/TLS、Sentinel/Cluster 高可用和故障演练；
 6. 告警通知的多渠道分发、值班升级策略和跨区域审计归档。
 
 这些是部署前置条件，不是仓库当前已经实现的功能。
@@ -338,5 +365,5 @@ docs/       架构、部署、测试文档
 
 1. OIDC/SSO、MQTT ACL、密钥托管与生产 TLS 渗透测试；
 2. 多站定位/时差融合与轨迹质量评分；
-3. 多副本共享 WebSocket 总线；
+3. Redis 高可用、连接池容量和跨区域部署；
 4. 真实无人机/抓包回放集与现场验收基线。

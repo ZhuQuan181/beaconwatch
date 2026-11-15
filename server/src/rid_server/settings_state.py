@@ -48,6 +48,7 @@ def set_subscriber_bus_hook(
             mode="json"
         )
         persisted = False
+        suppressed = False
         try:
             factory = get_session_factory()
             async with factory() as session:
@@ -55,9 +56,17 @@ def set_subscriber_bus_hook(
                     session,
                     alert,
                     enqueue_notification=notify,
+                    dedup_seconds=(
+                        settings.alert_dedup_seconds
+                        if settings is not None
+                        else None
+                    ),
                 )
-            payload = repository.alert_to_out(row).model_dump(mode="json")
-            persisted = True
+            if row is None:
+                suppressed = True
+            else:
+                payload = repository.alert_to_out(row).model_dump(mode="json")
+                persisted = True
         except Exception as exc:  # noqa: BLE001
             # Alert persistence is valuable but must never suppress the
             # live alert or break observation ingest.  The fallback keeps
@@ -67,6 +76,12 @@ def set_subscriber_bus_hook(
                 alert_id=getattr(alert, "alert_id", ""),
                 error=str(exc)[:200],
             )
+        if suppressed:
+            log.debug(
+                "alert.suppressed_duplicate",
+                alert_id=getattr(alert, "alert_id", ""),
+            )
+            return
         if persisted and notify and wake_notifications is not None:
             try:
                 wake_notifications()

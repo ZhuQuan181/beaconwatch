@@ -35,7 +35,8 @@ run the real edge/MQTT/database/API stack.
 - **Operations:** named API-key identities, viewer/operator/admin RBAC,
   reloadable key rotation, immutable alert and security audit records,
   request IDs, security headers, gzip, live/ready health checks, Prometheus
-  text metrics and automatic Alembic migrations in the server container.
+  text metrics, optional Redis-backed multi-replica fan-out and automatic
+  Alembic migrations in the server container.
 - **Alert workflow:** durable open/acknowledged/resolved state machine,
   automatic recurrence reopening, operator resolution and reopen actions,
   immutable audit events, status/rule/drone filters, live WebSocket updates,
@@ -49,6 +50,10 @@ run the real edge/MQTT/database/API stack.
   unidentified-drone highlighting.
 - **Verified chain:** official radio bytes → receiver → pipeline → MQTT →
   subscriber → database → HTTP, covered by unit, contract and E2E tests.
+- **Horizontal scale path:** optional MQTT shared subscriptions avoid
+  duplicate ingest, Redis Pub/Sub fans live frames to every API replica, and
+  PostgreSQL-backed alert deduplication prevents duplicate alerts and
+  notifications across workers.
 
 ## Components
 
@@ -66,8 +71,9 @@ Requirements: Docker with Compose, Python 3.11+, `uv`, and Node.js 20.19+.
 
 ```bash
 make install                 # create .venv and install Python/frontend deps
-make up                      # TimescaleDB + EMQX + server, with migrations
+make up                      # TimescaleDB + EMQX + Redis + server, with migrations
 make e2e                     # real official-frame -> DB -> HTTP verification
+make e2e-multi               # two API replicas + Redis + MQTT shared group
 
 cd frontend
 npm run dev                  # http://localhost:5173
@@ -104,21 +110,24 @@ The E2E command expects the stack from `make up`. See
 ## Production Boundaries
 
 The Docker Compose file is a development/reference topology, not a hardened
-production deployment. The API now supports named API keys, role enforcement,
-reloadable rotation, and an immutable audit trail; the MQTT subscriber supports
-verified TLS. Before exposing the stack to an untrusted network you still need:
+production deployment. The API supports named API keys, role enforcement,
+reloadable rotation, an immutable audit trail, Redis-backed multi-replica live
+fan-out, and verified MQTT TLS. Before exposing the stack to an untrusted
+network you still need:
 
 - MQTT TLS deployment, per-station credentials and ACLs;
 - HTTPS/WSS termination at a reverse proxy;
 - an external identity provider/OIDC and multi-factor login if human accounts
   must be centrally managed;
 - secret management and non-default database credentials;
-- a shared WebSocket fan-out layer if running multiple server replicas;
+- Redis ACL/TLS, high availability, capacity testing and failure drills;
+- a WebSocket-capable load balancer and one MQTT shared group for replicas;
 - alert retention/archive policy appropriate for your compliance regime.
 
-The current WebSocket fan-out is in-process, so a multi-replica server requires
-a shared bus such as Redis/NATS. See `docs/01-architecture.md` and
-`docs/02-deployment.md` for the exact implemented topology.
+Single-process deployments use in-memory fan-out by default. Multi-replica
+deployments set `RID_BUS_BACKEND=redis` and `RID_MQTT_SHARED_GROUP`; see
+`docs/01-architecture.md` and `docs/02-deployment.md` for the implemented
+topology and failure semantics.
 
 ## License
 

@@ -24,10 +24,12 @@ Compose 启动以下服务：
 |---|---:|---:|---|
 | `timescaledb` | 5432 | 5433 | 观测/站点/告警区域 |
 | `emqx` | 1883 / 18083 | 1883 / 18083 | MQTT / EMQX 控制台 |
+| `redis` | 6379 | 不暴露 | 多副本实时事件总线 |
 | `rid-server` | 8000 | 8000 | REST、WebSocket、指标 |
 
-`server/docker-entrypoint.sh` 会在 API 启动前执行所有 Alembic 迁移。迁移失败时
-容器不会带着旧 schema 启动。
+`server/docker-entrypoint.sh` 会在 API 启动前执行所有 Alembic 迁移。数据库刚
+通过探针但仍在完成恢复时，入口脚本会按有上限的指数退避重试；连续失败达到
+`RID_MIGRATION_MAX_ATTEMPTS` 后容器退出，不会带着旧 schema 启动。
 
 停止服务但保留数据库：
 
@@ -42,6 +44,33 @@ make reset
 ```
 
 开发/演示的默认数据库凭据写在 Compose 中，生产环境必须替换。
+
+### 多副本与 MQTT 共享订阅
+
+默认 Compose 为了本地访问固定了容器名和宿主机 8000 端口，只启动一个 API
+副本。实际横向扩展时，在负载均衡器后运行多个相同配置的 API 进程，并统一
+设置：
+
+```bash
+export RID_BUS_BACKEND=redis
+export RID_REDIS_URL=redis://redis:6379/0
+export RID_REDIS_REQUIRED=true
+export RID_MQTT_SHARED_GROUP=beaconwatch-prod
+```
+
+- 每个副本的内部实例 ID 必须唯一；留空时会自动使用
+  `<hostname>-<pid>`，并追加到 MQTT client id。
+- 所有副本使用同一个 `RID_MQTT_SHARED_GROUP`，让每条观测只被一个副本
+  入库；没有共享组时，每个副本都会尝试处理同一条消息，虽然数据库幂等，
+  但会浪费连接和数据库容量。
+- 所有副本使用同一个 Redis channel。WebSocket 连接可以落在任意副本，
+  不要求粘性会话；Redis Pub/Sub 是 at-most-once，客户端断线后依赖 REST
+  历史回补。
+- `RID_REDIS_REQUIRED=true` 时 Redis 不可用只会让 readiness 返回 503，
+  进程会持续重连；需要保证负载均衡器摘除未就绪副本。
+- Compose 中的 `redis` 没有暴露宿主机端口，也没有启用持久化；它只保存
+  实时 Pub/Sub 消息。生产环境应使用受控的 Redis ACL/TLS 与高可用方案，
+  不要把该开发实例直接暴露到公网。
 
 ### 身份认证、RBAC 与审计
 
@@ -273,7 +302,8 @@ curl -s http://localhost:8000/metrics
 ```
 
 - `live` 只表示进程可响应；
-- `ready` 会执行数据库 `SELECT 1`；
+- `ready` 会执行数据库 `SELECT 1`；启用
+  `RID_REDIS_REQUIRED=true` 时还会检查 Redis 总线连接；
 - Compose healthcheck 使用 `ready`；
 - 指标是 Prometheus text 格式，但仓库未附带 Prometheus/Grafana 配置。
 - 每个 HTTP 响应带 `X-Request-ID`，并记录请求数、耗时、状态码和鉴权失败数；
@@ -287,6 +317,11 @@ curl -s http://localhost:8000/metrics
 - `rid_auth_required`、`rid_auth_principals`、
   `rid_http_auth_failures_total` 和 `rid_http_authz_failures_total`
   用于确认鉴权已启用，以及发现错误 key/越权尝试。
+- `rid_bus_backend_redis`、`rid_bus_redis_connected`、
+  `rid_bus_redis_reconnects_total`、
+  `rid_bus_redis_publish_failures_total` 和
+  `rid_bus_redis_received_frames_total` 用于确认共享总线状态与跨副本流量；
+  发布失败计数持续增长时应检查 Redis 网络、认证和容量。
 
 ## 5. 端到端验证
 
@@ -299,12 +334,23 @@ receiver、pipeline、EMQX、数据库和 FastAPI，最后通过 HTTP 检查协�
 速度、操作员位置、告警生命周期，并用本地签名接收端验证触发、确认、解决和
 重开通知的 HMAC 与投递顺序；同时验证告警分页形状和最终状态统计。
 
+多副本路径使用独立验证脚本：
+
+```bash
+make e2e-multi
+```
+
+该命令启动两个临时 uvicorn 副本（独立端口和实例 ID），使用同一个真实
+EMQX、PostgreSQL 和 Redis channel，验证 shared subscription 只消费一次、
+Redis 将 frame 广播给两个副本的 WebSocket 客户端、数据库产生唯一告警记录和
+唯一触发审计，并在结束后清理测试行。
+
 ## 6. 数据库升级与备份
 
 升级镜像：
 
 ```bash
-docker build -t beaconwatch-server:0.8.0 ./server
+docker build -t beaconwatch-server:0.9.0 ./server
 docker compose -f server/docker-compose.yml up -d --build rid-server
 ```
 
@@ -331,7 +377,9 @@ cat beaconwatch-YYYYMMDD-HHMMSS.dump | \
 - [ ] 使用 HTTPS/WSS 反向代理；
 - [ ] 为 MQTT 配置 TLS（`RID_MQTT_CA_CERT` 等）、独立站点账号和 ACL；
 - [ ] 限制 5433/1883/18083/8000 的暴露范围；
-- [ ] 为多副本部署引入共享 WebSocket 总线；
+- [ ] 多副本部署启用 Redis 总线、同一 MQTT shared group、唯一实例 ID 和
+      WebSocket-capable 负载均衡；
+- [ ] 为生产 Redis 配置 ACL/TLS、高可用、容量和断线演练；
 - [ ] 配置数据库备份、恢复演练和磁盘容量告警；
 - [ ] 启用并验证 Webhook 签名、重试/死信监控、告警保留期限和清理策略；
 - [ ] 用真实抓包集和现场无人机完成验收测试。
@@ -345,6 +393,10 @@ docker compose -f server/docker-compose.yml logs --tail=200 timescaledb
 ```
 
 - `/health/ready` 返回 503：检查数据库启动、凭据和迁移日志；
+- `/health/ready` 返回 503 且 `detail` 为 `redis bus unavailable`：检查
+  `RID_REDIS_URL`、认证、网络和 `rid_bus_redis_connected`；
+- `rid_bus_redis_publish_failures_total` 增长：检查 Redis 主从切换和连接数；
+  当前副本仍会本地降级，其他副本会在重连后继续接收新事件；
 - `rid_mqtt_reconnects_total` 持续增长：检查 broker 地址、网络和 MQTT 凭据；
 - 边缘端有流量但数据库无新行：检查 topic 年月版本、站点 ID 和 outbox 日志；
 - 地图有列表但无位置：检查观测是否只有 Basic ID、尚无 Location 消息。

@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.9.0 - 2026-11-16
+
+### Added
+
+- Optional Redis Pub/Sub live bus for multi-replica WebSocket fan-out. Every
+  API replica receives observations and alert transitions from one shared
+  channel, and Redis is included in the reference Compose topology.
+- Redis connection health, reconnect, publish-failure and remote-frame
+  counters, plus local-fan-out fallback while the shared bus is unavailable.
+- Optional MQTT shared subscriptions through `RID_MQTT_SHARED_GROUP`, so
+  replicas consume each observation once instead of each ingesting every
+  message. MQTT client IDs now always receive a process-unique instance
+  suffix, including when Compose supplies an empty `RID_INSTANCE_ID`.
+- Durable cross-replica alert deduplication. Replica candidates inside
+  `RID_ALERT_DEDUP_SECONDS` are suppressed before count, audit event or
+  notification insertion; PostgreSQL advisory locks close the concurrent
+  first-insert race.
+- Redis-backed readiness semantics: `RID_REDIS_REQUIRED=true` returns 503
+  while the bus cannot connect, without putting the process into a crash loop.
+- Tests for two-instance Redis fan-out, reconnect after publish failure,
+  malformed frames, readiness and metrics, shared subscription topics,
+  empty instance IDs and durable alert deduplication.
+- A real two-replica E2E (`make e2e-multi`) that starts two uvicorn processes
+  against the existing PostgreSQL, EMQX and Redis, verifies exactly-once
+  shared MQTT consumption, Redis fan-out to both WebSocket clients, and one
+  durable alert/audit event despite concurrent rule evaluation.
+
+### Changed
+
+- Redis Pub/Sub uses no socket read deadline; the listener performs bounded
+  idle reads so a healthy quiet subscription is not disconnected every few
+  seconds.
+- The reference Compose stack starts Redis and exposes no Redis host port.
+  Multi-replica deployments should enable `RID_BUS_BACKEND=redis`, set the
+  same `RID_MQTT_SHARED_GROUP`, and place the API replicas behind a
+  WebSocket-capable load balancer.
+- Repository/package metadata advanced to 0.9.0.
+
+### Fixed
+
+- A failed Redis publish now wakes the listener into reconnecting instead of
+  leaving it blocked on an old Pub/Sub connection.
+- Empty instance IDs can no longer make multiple MQTT clients share the same
+  broker identity and repeatedly disconnect each other.
+- HTTP readiness and metrics now expose Redis backend state, and the app
+  cleanly starts/stops the configured bus during its lifespan.
+- The container entrypoint retries Alembic with bounded exponential backoff
+  while PostgreSQL finishes recovery after becoming probe-ready, instead of
+  relying on a Docker restart to complete a cold start.
+
 ## 0.8.0 - 2026-11-16
 
 ### Added

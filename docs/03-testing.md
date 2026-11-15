@@ -42,6 +42,12 @@ PYTHONPATH=server/src .venv/bin/python -m pytest -q server/tests
   跨资源安全审计、角色拒绝、审计过滤和游标分页；
 - 可选旧版 admin Bearer token、请求 ID、安全响应头；
 - WebSocket 心跳、fan-out、慢消费者丢弃策略；
+- 两个 Redis 总线实例的跨副本 fan-out、发布失败后的本地降级与重连、
+  非法/未知远端 frame 隔离；
+- Redis 必需时的 readiness、总线指标、应用 lifespan 启动/停止；
+- MQTT shared subscription topic、共享前缀解析和空实例 ID 的唯一 client id；
+- 数据库级告警去重窗口、重复候选不重复计数/广播，以及 PostgreSQL
+  advisory lock 路径；
 - 禁飞区/限高/未识别告警；
 - 稳定 alert ID；
 - 告警账本 upsert、重复触发计数、乱序触发不倒退时间；
@@ -86,6 +92,20 @@ make e2e
 `resolved`、`reopened`、最终 `resolved` 的 HMAC、事件顺序和唯一
 `delivery_id`，并检查告警分页响应和最终状态统计。
 
+Redis 总线测试默认尝试 `redis://127.0.0.1:6379/15`，也可显式设置
+`RID_TEST_REDIS_URL` 指向隔离实例。测试会为每次运行生成唯一 channel，清理
+自己创建的 Pub/Sub 订阅；不会删除 Redis 数据。
+
+多副本 E2E：
+
+```bash
+make e2e-multi
+```
+
+脚本启动两个真实 uvicorn 副本并验证 MQTT shared subscription 的总消费数、
+两个 WebSocket 客户端都收到 Redis fan-out、唯一告警和唯一触发审计事件；
+结束后删除本次创建的 station/observation/drone/alert 行。
+
 ### 前端
 
 ```bash
@@ -109,6 +129,10 @@ project、独立端口和独立数据卷，不要对现有生产卷执行 `down 
 2. `/health/ready` 返回 200；
 3. `/metrics` 显示 MQTT 已连接；
 4. 测试容器和测试卷可以独立删除。
+
+冷启动还会验证迁移重试：PostgreSQL 容器变为 healthy 后仍可能短暂返回
+“database system is starting up”，入口脚本应自行重试并在同一个容器进程内
+完成迁移，而不是依赖 restart policy 碰运气。
 
 升级发布还需验证上一版的 schema 升级：已有告警、审计事件和确认状态必须
 保留，`notification_outbox` 应新增且为待投递状态，`audit_events` 与
@@ -134,7 +158,8 @@ https://github.com/opendroneid/opendroneid-core-c
 
 `.github/workflows/ci.yml` 包含：
 
-- Python 3.11：安装、`pip check`、Ruff、edge/server/contract 测试；
+- Python 3.11 + Redis 7 service：安装、`pip check`、Ruff、edge/server/contract
+  测试（跨副本总线测试不会跳过）；
 - Node 22：`npm ci`、生产依赖安全审计、TypeScript、生产构建；
 - Node 22：真实构建和 mock/Pages 构建；
 - Docker：Compose 配置校验和服务端镜像构建。
@@ -146,6 +171,6 @@ https://github.com/opendroneid/opendroneid-core-c
 
 - 真实无线电硬件上的长期稳定性；
 - 多机高并发/容量压测；
-- 多副本服务端和共享总线的故障切换；
+- Redis 主从切换、网络分区、长时间断线和大规模多副本故障演练；
 - 浏览器端 E2E/视觉回归；
 - OIDC/MFA 与生产 TLS、MQTT ACL 的渗透测试。

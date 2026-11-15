@@ -6,11 +6,12 @@ add instrumentation / deduplication in one place.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import hashlib
+from datetime import datetime, timedelta, timezone
 from typing import Sequence
 from uuid import uuid4
 
-from sqlalchemy import and_, case, delete, func, or_, select
+from sqlalchemy import and_, case, delete, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from ulid import ULID
@@ -591,13 +592,34 @@ async def _alert_for_update(
     return result.scalar_one_or_none()
 
 
+async def _lock_alert_id(session: AsyncSession, alert_id: str) -> None:
+    """Serialize alert upserts across API replicas.
+
+    ``SELECT ... FOR UPDATE`` only locks an existing row. Two replicas
+    can otherwise both observe "no row" and race to emit the same alert.
+    A transaction-scoped PostgreSQL advisory lock closes that gap; SQLite
+    tests do not need it and ignore the branch.
+    """
+
+    bind = session.get_bind()
+    if bind is None or bind.dialect.name != "postgresql":
+        return
+    digest = hashlib.sha256(alert_id.encode("utf-8")).digest()
+    lock_id = int.from_bytes(digest[:8], "big", signed=True)
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(:lock_id)"),
+        {"lock_id": lock_id},
+    )
+
+
 async def upsert_alert(
     session: AsyncSession,
     alert: Alert,
     *,
     now: datetime | None = None,
     enqueue_notification: bool = False,
-) -> AlertRecord:
+    dedup_seconds: float | None = None,
+) -> AlertRecord | None:
     """Insert an alert, or record a later recurrence of the same alert id.
 
     ``alert_id`` is deterministic per (drone, rule, zone), so a recurrence
@@ -605,11 +627,30 @@ async def upsert_alert(
     rather than create a duplicate.  A recurrence after resolution starts a
     new handling cycle, clears the previous cycle's live disposition fields,
     increments ``reopen_count`` and records the transition in the audit log.
+
+    When ``dedup_seconds`` is supplied, the durable ``triggered_at`` value
+    is also the cross-replica emission gate.  A candidate inside the window
+    returns ``None`` without incrementing the count, writing an event or
+    enqueueing a notification.  The check and update run under a
+    per-alert advisory lock on PostgreSQL.
     """
     observed_at = _parse_alert_time(
         alert.at, now or datetime.now(tz=timezone.utc)
     )
+    await _lock_alert_id(session, alert.alert_id)
     existing = await _alert_for_update(session, alert.alert_id)
+    dedup_cutoff = (
+        observed_at - timedelta(seconds=max(0.0, dedup_seconds))
+        if dedup_seconds is not None
+        else None
+    )
+    if (
+        existing is not None
+        and dedup_cutoff is not None
+        and _as_utc(existing.triggered_at) > dedup_cutoff
+    ):
+        await session.rollback()
+        return None
     previous_status = existing.status if existing is not None else None
     previous_resolution_note = (
         existing.resolution_note if existing is not None else None
@@ -625,6 +666,9 @@ async def upsert_alert(
         AlertRecord.resolved_at.is_not(None),
         AlertRecord.resolved_at < observed_at,
     )
+    conflict_options: dict = {}
+    if dedup_cutoff is not None:
+        conflict_options["where"] = AlertRecord.triggered_at <= dedup_cutoff
     stmt = (
         pg_insert(AlertRecord)
         .values(
@@ -707,9 +751,13 @@ async def upsert_alert(
                     else_=AlertRecord.reopen_count,
                 ),
             ),
+            **conflict_options,
         )
     )
-    await session.execute(stmt)
+    result = await session.execute(stmt)
+    if dedup_cutoff is not None and (result.rowcount or 0) == 0:
+        await session.rollback()
+        return None
     await session.flush()
     row = await session.get(
         AlertRecord, alert.alert_id, populate_existing=True

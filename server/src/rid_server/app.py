@@ -11,7 +11,7 @@ from sqlalchemy import text
 
 from .alerts import AlertEngine, AlertRing
 from .auth import AuthStore
-from .bus import ObservationBus
+from .bus import create_bus
 from .config import get_settings
 from .db import dispose_engine, get_session_factory
 from .logging_setup import configure_logging, get_logger
@@ -37,10 +37,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = getattr(app.state, "settings", None) or get_settings()
     app.state.settings = settings
     configure_logging(settings.log_level)
-    log.info("startup", env=settings.env, http_port=settings.http_port)
+    log.info(
+        "startup",
+        env=settings.env,
+        http_port=settings.http_port,
+        instance_id=settings.instance_id,
+        mqtt_client_id=settings.mqtt_client_identifier,
+        bus_backend=settings.bus_backend,
+    )
 
-    bus = ObservationBus()
+    bus = create_bus(settings)
     app.state.bus = bus
+    await bus.start()
 
     subscriber = MqttSubscriber(settings)
     app.state.subscriber = subscriber
@@ -108,6 +116,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await notifier.stop()
         if retention is not None:
             await retention.stop()
+        await bus.stop()
         await dispose_engine()
         log.info("shutdown.done")
 
@@ -117,7 +126,7 @@ def create_app() -> FastAPI:
     request_metrics = RequestMetrics()
     app = FastAPI(
         title="RID Server",
-        version="0.8.0",
+        version="0.9.0",
         lifespan=lifespan,
     )
     app.state.settings = settings
@@ -152,6 +161,16 @@ def create_app() -> FastAPI:
 
     @app.get("/health/ready", tags=["meta"])
     async def health_ready() -> dict[str, str]:
+        bus = getattr(app.state, "bus", None)
+        if (
+            getattr(bus, "backend", "memory") == "redis"
+            and app.state.settings.redis_required
+            and not getattr(bus, "redis_connected", False)
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="redis bus unavailable",
+            )
         try:
             factory = get_session_factory()
             async with factory() as session:
@@ -189,6 +208,21 @@ def create_app() -> FastAPI:
             ),
             "rid_ws_delivered_frames_total": int(
                 getattr(bus, "delivered_frames", 0)
+            ),
+            "rid_bus_redis_connected": int(
+                bool(getattr(bus, "redis_connected", False))
+            ),
+            "rid_bus_backend_redis": int(
+                getattr(bus, "backend", "memory") == "redis"
+            ),
+            "rid_bus_redis_reconnects_total": int(
+                getattr(bus, "reconnects", 0)
+            ),
+            "rid_bus_redis_publish_failures_total": int(
+                getattr(bus, "publish_failures", 0)
+            ),
+            "rid_bus_redis_received_frames_total": int(
+                getattr(bus, "remote_received_frames", 0)
             ),
             "rid_notification_worker_running": int(
                 bool(getattr(notifier, "running", False))

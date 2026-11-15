@@ -138,6 +138,30 @@ async def test_trigger_enqueues_durable_notification(db_engine, session):
     }
 
 
+async def test_dedup_window_does_not_enqueue_duplicate_notification(
+    db_engine, session
+):
+    first_at = datetime(2026, 11, 16, 2, 0, tzinfo=timezone.utc)
+    first = await upsert_alert(
+        session,
+        make_alert(at=first_at),
+        enqueue_notification=True,
+        dedup_seconds=120,
+    )
+    duplicate = await upsert_alert(
+        session,
+        make_alert(at=first_at + timedelta(seconds=30)),
+        enqueue_notification=True,
+        dedup_seconds=120,
+    )
+
+    rows = await get_outbox(factory_for(db_engine))
+    assert first is not None
+    assert duplicate is None
+    assert len(rows) == 1
+    assert rows[0].payload["metadata"]["trigger_count"] == 1
+
+
 async def test_lifecycle_transitions_enqueue_once(session):
     first_at = datetime(2026, 11, 16, 2, 0, tzinfo=timezone.utc)
     await upsert_alert(

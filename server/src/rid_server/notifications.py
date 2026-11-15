@@ -287,7 +287,7 @@ class NotificationWorker:
         ).hexdigest()
         headers = {
             "Content-Type": "application/json",
-            "User-Agent": "BeaconWatch-Notifier/0.8.0",
+            "User-Agent": "BeaconWatch-Notifier/0.9.0",
             "Idempotency-Key": delivery.delivery_id,
             "X-BeaconWatch-Schema-Version": "1",
             "X-BeaconWatch-Event": delivery.kind,

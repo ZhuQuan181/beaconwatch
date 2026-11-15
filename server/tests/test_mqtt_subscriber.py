@@ -39,6 +39,19 @@ async def test_extract_station_id_accepts_other_versions():
     assert MqttSubscriber._extract_station_id("rid/v10/x/obs") == "x"
 
 
+async def test_extract_station_id_accepts_shared_subscription_prefix():
+    assert (
+        MqttSubscriber._extract_station_id(
+            "$share/beaconwatch/rid/v1/station-42/obs"
+        )
+        == "station-42"
+    )
+    assert (
+        MqttSubscriber._extract_station_id("$share/beaconwatch/rid/v1/obs")
+        is None
+    )
+
+
 async def test_extract_station_id_invalid():
     # Wrong number of segments
     assert MqttSubscriber._extract_station_id("rid/v1/obs") is None

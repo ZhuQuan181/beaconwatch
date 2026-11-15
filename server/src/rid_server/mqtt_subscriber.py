@@ -94,21 +94,22 @@ class MqttSubscriber:
                         port=self._settings.mqtt_port,
                         username=self._settings.mqtt_username or None,
                         password=self._settings.mqtt_password or None,
-                        identifier=self._settings.mqtt_client_id,
+                        identifier=self._settings.mqtt_client_identifier,
                         tls_context=self._tls_context,
                     ) as client:
                         await client.subscribe(
-                            self._settings.mqtt_obs_topic,
+                            self._settings.mqtt_obs_subscription_topic,
                             qos=self._settings.mqtt_qos,
                         )
                         await client.subscribe(
-                            self._settings.mqtt_info_topic,
+                            self._settings.mqtt_info_subscription_topic,
                             qos=self._settings.mqtt_qos,
                         )
                         log.info(
                             "mqtt.subscribed",
-                            obs_topic=self._settings.mqtt_obs_topic,
-                            info_topic=self._settings.mqtt_info_topic,
+                            obs_topic=self._settings.mqtt_obs_subscription_topic,
+                            info_topic=self._settings.mqtt_info_subscription_topic,
+                            shared_group=self._settings.mqtt_shared_group,
                         )
                         self.connected = True
                         backoff = 1.0  # reset on successful connect
@@ -141,7 +142,7 @@ class MqttSubscriber:
         """
         self.received += 1
         topic_str = str(topic)
-        topic_parts = topic_str.split("/")
+        topic_parts = self._topic_parts(topic_str)
         if len(topic_parts) == 4 and topic_parts[3] == "info":
             await self._handle_station_info(topic_str, payload)
             return
@@ -277,13 +278,30 @@ class MqttSubscriber:
         stay off the production topic, and hard-coding the version here
         made every such message arrive with ``station_id=None``.
         """
-        parts = topic.split("/")
+        parts = MqttSubscriber._topic_parts(topic)
         # expected: ['rid', '<version>', '<station_id>', 'obs']
         if len(parts) != 4 or parts[0] != "rid":
             return None
         if not parts[1].startswith("v"):
             return None
         return parts[2]
+
+    @staticmethod
+    def _topic_parts(topic: str) -> list[str]:
+        """Return the application topic, tolerating a shared prefix.
+
+        Brokers normally deliver the original topic to shared
+        subscribers. Accepting ``$share/<group>/...`` here keeps direct
+        handler tests and brokers that echo the subscription filter
+        working without changing the wire contract.
+        """
+
+        parts = topic.split("/")
+        if parts and parts[0] == "$share":
+            if len(parts) < 6:
+                return []
+            return parts[2:]
+        return parts
 
     def _build_tls_context(self) -> ssl.SSLContext | None:
         """Build a verified TLS context when ``mqtt_tls`` is enabled."""
