@@ -186,6 +186,8 @@ class AlertEvent(Base):
     )
     action: Mapped[str] = mapped_column(String(24), nullable=False)
     actor: Mapped[str | None] = mapped_column(String(128))
+    actor_subject: Mapped[str | None] = mapped_column(String(128))
+    request_id: Mapped[str | None] = mapped_column(String(128))
     note: Mapped[str | None] = mapped_column(Text)
     occurred_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
@@ -202,6 +204,71 @@ class AlertEvent(Base):
             "alert_id",
             "occurred_at",
         ),
+        Index("ix_alert_events_actor_subject", "actor_subject"),
+    )
+
+
+class AuditEvent(Base):
+    """Security/access audit for state-changing operator API calls.
+
+    Alert lifecycle events remain in ``alert_events`` because they are part
+    of the alert domain.  This table provides a cross-resource, append-only
+    record of who invoked which mutation, with the request id and effective
+    roles.  Rows are written in the same transaction as the mutation.
+    """
+
+    __tablename__ = "audit_events"
+
+    event_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    request_id: Mapped[str | None] = mapped_column(String(128))
+    actor_subject: Mapped[str | None] = mapped_column(String(128))
+    actor_name: Mapped[str | None] = mapped_column(String(128))
+    actor_roles: Mapped[list] = mapped_column(
+        JSONB().with_variant(JSON(), "sqlite"),
+        nullable=False,
+        default=list,
+    )
+    authenticated: Mapped[bool] = mapped_column(
+        nullable=False, default=False, server_default="false"
+    )
+    action: Mapped[str] = mapped_column(String(64), nullable=False)
+    resource_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    resource_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    outcome: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="success", server_default="success"
+    )
+    method: Mapped[str] = mapped_column(String(8), nullable=False)
+    path: Mapped[str] = mapped_column(String(512), nullable=False)
+    status_code: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=200, server_default="200"
+    )
+    detail: Mapped[dict] = mapped_column(
+        JSONB().with_variant(JSON(), "sqlite"),
+        nullable=False,
+        default=dict,
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "outcome IN ('success', 'noop')",
+            name="ck_audit_events_outcome",
+        ),
+        Index("ix_audit_events_occurred_event", "occurred_at", "event_id"),
+        Index(
+            "ix_audit_events_actor_occurred",
+            "actor_subject",
+            "occurred_at",
+        ),
+        Index(
+            "ix_audit_events_resource_occurred",
+            "resource_type",
+            "resource_id",
+            "occurred_at",
+        ),
+        Index("ix_audit_events_action_occurred", "action", "occurred_at"),
     )
 
 

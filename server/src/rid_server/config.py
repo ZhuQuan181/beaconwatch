@@ -27,8 +27,15 @@ class Settings(BaseSettings):
     http_host: str = "0.0.0.0"
     http_port: int = 8000
     # Empty means "open" for local/demo deployments.  Set RID_API_TOKEN
-    # to require `Authorization: Bearer <token>` on data routes.
+    # to require `Authorization: Bearer <token>` on data routes.  The
+    # legacy token is an administrator credential; use a key file for
+    # named identities and least-privilege roles.
     api_token: SecretStr | None = None
+    # JSON credential file with per-operator SHA-256 API-key digests.
+    # When configured, callers must present one of those keys and the
+    # API enforces viewer/operator/admin capabilities.
+    auth_users_file: str = ""
+    auth_reload_interval_s: float = Field(default=5.0, ge=1.0, le=300.0)
     # Comma-separated origins; empty keeps the same-origin default.
     cors_origins: str = ""
     ws_ping_interval_s: float = Field(default=20.0, ge=5.0, le=120.0)

@@ -32,9 +32,10 @@ run the real edge/MQTT/database/API stack.
 - **Server ingest:** MQTT observation and station-heartbeat topics, schema
   validation, duplicate-safe idempotent writes, TimescaleDB hypertable and
   indexed keyset pagination.
-- **Operations:** optional Bearer-token auth, request IDs, security headers,
-  gzip, live/ready health checks, Prometheus text metrics, automatic Alembic
-  migrations in the server container.
+- **Operations:** named API-key identities, viewer/operator/admin RBAC,
+  reloadable key rotation, immutable alert and security audit records,
+  request IDs, security headers, gzip, live/ready health checks, Prometheus
+  text metrics and automatic Alembic migrations in the server container.
 - **Alert workflow:** durable open/acknowledged/resolved state machine,
   automatic recurrence reopening, operator resolution and reopen actions,
   immutable audit events, status/rule/drone filters, live WebSocket updates,
@@ -76,10 +77,13 @@ API documentation is at http://localhost:8000/docs and metrics are at
 http://localhost:8000/metrics. EMQX's local dashboard is at
 http://localhost:18083.
 
-For a private deployment, set `RID_API_TOKEN` on the server and build the
-dashboard with the same value in `VITE_API_TOKEN`. The build-time token is
-embedded in the browser bundle, so use an HTTPS reverse proxy (or an
-identity-aware gateway) rather than publishing that bundle to untrusted users.
+For a private deployment, generate named keys with
+`python scripts/generate_api_key.py` and mount the resulting JSON file through
+`RID_AUTH_USERS_FILE`. Build the dashboard with one of those keys in
+`VITE_API_TOKEN`; use a read-only viewer key for wall displays. The key is
+embedded in the browser bundle, so terminate HTTPS and do not publish an
+operator/admin bundle to untrusted users. The legacy `RID_API_TOKEN` remains
+available as a single administrator credential.
 
 To enable alert webhooks, set both `RID_NOTIFY_WEBHOOK_URL` and
 `RID_NOTIFY_WEBHOOK_SECRET`. The receiver must verify the
@@ -100,17 +104,17 @@ The E2E command expects the stack from `make up`. See
 ## Production Boundaries
 
 The Docker Compose file is a development/reference topology, not a hardened
-production deployment. The API now supports optional Bearer authentication and
-the MQTT subscriber supports verified TLS, but before exposing the stack to an
-untrusted network you still need:
+production deployment. The API now supports named API keys, role enforcement,
+reloadable rotation, and an immutable audit trail; the MQTT subscriber supports
+verified TLS. Before exposing the stack to an untrusted network you still need:
 
-- authorization/roles, auditing and token rotation beyond the single shared
-  Bearer token;
 - MQTT TLS deployment, per-station credentials and ACLs;
 - HTTPS/WSS termination at a reverse proxy;
+- an external identity provider/OIDC and multi-factor login if human accounts
+  must be centrally managed;
 - secret management and non-default database credentials;
 - a shared WebSocket fan-out layer if running multiple server replicas;
-- full role-based access control beyond the alert workflow audit trail.
+- alert retention/archive policy appropriate for your compliance regime.
 
 The current WebSocket fan-out is in-process, so a multi-replica server requires
 a shared bus such as Redis/NATS. See `docs/01-architecture.md` and

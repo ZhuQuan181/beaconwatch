@@ -16,9 +16,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ulid import ULID
 
 from .alerts import Alert
+from .audit import AuditContext
 from .db import (
     AlertEvent,
     AlertRecord,
+    AuditEvent,
     Drone,
     NotificationOutbox,
     Observation,
@@ -28,6 +30,7 @@ from .logging_setup import get_logger
 from .models import (
     AlertEventOut,
     AlertOut,
+    AuditEventOut,
     DroneObservation,
     DroneSummary,
     Position,
@@ -388,6 +391,8 @@ def alert_event_to_out(row: AlertEvent) -> AlertEventOut:
         alert_id=row.alert_id,
         action=row.action,
         actor=row.actor,
+        actor_subject=row.actor_subject,
+        request_id=row.request_id,
         note=row.note,
         at=_iso(row.occurred_at) or "",
         detail=row.detail or {},
@@ -400,6 +405,8 @@ def _append_alert_event(
     *,
     action: str,
     actor: str | None,
+    actor_subject: str | None = None,
+    request_id: str | None = None,
     note: str | None,
     occurred_at: datetime,
     detail: dict | None = None,
@@ -410,11 +417,115 @@ def _append_alert_event(
             alert_id=alert_id,
             action=action,
             actor=actor,
+            actor_subject=actor_subject,
+            request_id=request_id,
             note=note,
             occurred_at=occurred_at,
             detail=detail or {},
         )
     )
+
+
+def audit_event_to_out(row: AuditEvent) -> AuditEventOut:
+    return AuditEventOut(
+        event_id=row.event_id,
+        at=_iso(row.occurred_at) or "",
+        request_id=row.request_id,
+        actor_subject=row.actor_subject,
+        actor_name=row.actor_name,
+        actor_roles=list(row.actor_roles or []),
+        authenticated=bool(row.authenticated),
+        action=row.action,
+        resource_type=row.resource_type,
+        resource_id=row.resource_id,
+        outcome=row.outcome,
+        method=row.method,
+        path=row.path,
+        status_code=row.status_code,
+        detail=row.detail or {},
+    )
+
+
+def append_audit_event(
+    session: AsyncSession,
+    *,
+    context: AuditContext,
+    occurred_at: datetime,
+    outcome: str = "success",
+    extra_detail: dict | None = None,
+) -> None:
+    """Stage one audit row in the caller's transaction.
+
+    Repository functions commit after the mutation and the staged audit
+    row, which makes the access record atomic with the business change.
+    """
+
+    detail = dict(context.detail)
+    if extra_detail:
+        detail.update(extra_detail)
+    session.add(
+        AuditEvent(
+            event_id=f"aud_{ULID()}",
+            occurred_at=_as_utc(occurred_at),
+            request_id=context.request_id,
+            actor_subject=context.actor_subject,
+            actor_name=context.actor_name,
+            actor_roles=list(context.actor_roles),
+            authenticated=context.authenticated,
+            action=context.action,
+            resource_type=context.resource_type,
+            resource_id=context.resource_id,
+            outcome=outcome,
+            method=context.method,
+            path=context.path,
+            status_code=200,
+            detail=detail,
+        )
+    )
+
+
+async def list_audit_events(
+    session: AsyncSession,
+    *,
+    limit: int = 100,
+    before: tuple[datetime, str] | None = None,
+    actor_subject: str | None = None,
+    action: str | None = None,
+    resource_type: str | None = None,
+    resource_id: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+) -> Sequence[AuditEvent]:
+    stmt = select(AuditEvent)
+    if before is not None:
+        occurred_at, event_id = before
+        stmt = stmt.where(
+            or_(
+                AuditEvent.occurred_at < occurred_at,
+                and_(
+                    AuditEvent.occurred_at == occurred_at,
+                    AuditEvent.event_id < event_id,
+                ),
+            )
+        )
+    if actor_subject:
+        stmt = stmt.where(AuditEvent.actor_subject == actor_subject)
+    if action:
+        stmt = stmt.where(AuditEvent.action == action)
+    if resource_type:
+        stmt = stmt.where(AuditEvent.resource_type == resource_type)
+    if resource_id:
+        stmt = stmt.where(AuditEvent.resource_id == resource_id)
+    if since is not None:
+        stmt = stmt.where(AuditEvent.occurred_at >= since)
+    if until is not None:
+        stmt = stmt.where(AuditEvent.occurred_at <= until)
+    stmt = stmt.order_by(
+        AuditEvent.occurred_at.desc(),
+        AuditEvent.event_id.desc(),
+    ).limit(limit)
+    result = await session.execute(stmt)
+    return result.scalars().all()
 
 
 async def _enqueue_notification_safely(
@@ -942,6 +1053,7 @@ async def acknowledge_alert(
     note: str = "",
     now: datetime | None = None,
     enqueue_notification: bool = False,
+    audit: AuditContext | None = None,
 ) -> AlertRecord | None:
     """Record the first acknowledgement for an alert.
 
@@ -972,6 +1084,8 @@ async def acknowledge_alert(
             alert_id,
             action="acknowledged",
             actor=actor,
+            actor_subject=audit.actor_subject if audit else None,
+            request_id=audit.request_id if audit else None,
             note=clean_note,
             occurred_at=transition_at,
         )
@@ -985,8 +1099,24 @@ async def acknowledge_alert(
                 occurred_at=transition_at,
                 metadata={"previous_status": previous_status},
             )
+        if audit is not None:
+            append_audit_event(
+                session,
+                context=audit,
+                occurred_at=transition_at,
+                extra_detail={"changed": True},
+            )
         await session.commit()
         await session.refresh(row)
+    elif audit is not None:
+        append_audit_event(
+            session,
+            context=audit,
+            occurred_at=datetime.now(tz=timezone.utc),
+            outcome="noop",
+            extra_detail={"changed": False},
+        )
+        await session.commit()
     return row
 
 
@@ -998,12 +1128,22 @@ async def resolve_alert(
     note: str = "",
     now: datetime | None = None,
     enqueue_notification: bool = False,
+    audit: AuditContext | None = None,
 ) -> AlertRecord | None:
     """Resolve an alert.  Repeating the same call is idempotent."""
     row = await _alert_for_update(session, alert_id)
     if row is None:
         return None
     if row.resolved_at is not None:
+        if audit is not None:
+            append_audit_event(
+                session,
+                context=audit,
+                occurred_at=datetime.now(tz=timezone.utc),
+                outcome="noop",
+                extra_detail={"changed": False},
+            )
+            await session.commit()
         return row
 
     transition_at = _as_utc(now or datetime.now(tz=timezone.utc))
@@ -1020,6 +1160,8 @@ async def resolve_alert(
         alert_id,
         action="resolved",
         actor=actor,
+        actor_subject=audit.actor_subject if audit else None,
+        request_id=audit.request_id if audit else None,
         note=clean_note,
         occurred_at=transition_at,
     )
@@ -1032,6 +1174,13 @@ async def resolve_alert(
             note=clean_note,
             occurred_at=transition_at,
             metadata={"previous_status": previous_status},
+        )
+    if audit is not None:
+        append_audit_event(
+            session,
+            context=audit,
+            occurred_at=transition_at,
+            extra_detail={"changed": True},
         )
     await session.commit()
     await session.refresh(row)
@@ -1046,6 +1195,7 @@ async def reopen_alert(
     note: str = "",
     now: datetime | None = None,
     enqueue_notification: bool = False,
+    audit: AuditContext | None = None,
 ) -> AlertRecord | None:
     """Reopen a resolved alert and start a fresh acknowledgement cycle."""
     row = await _alert_for_update(session, alert_id)
@@ -1073,6 +1223,8 @@ async def reopen_alert(
         alert_id,
         action="reopened",
         actor=actor,
+        actor_subject=audit.actor_subject if audit else None,
+        request_id=audit.request_id if audit else None,
         note=clean_note,
         occurred_at=transition_at,
         detail={
@@ -1093,6 +1245,13 @@ async def reopen_alert(
                 "previous_status": previous_status,
                 "reopen_count": row.reopen_count,
             },
+        )
+    if audit is not None:
+        append_audit_event(
+            session,
+            context=audit,
+            occurred_at=transition_at,
+            extra_detail={"changed": True},
         )
     await session.commit()
     await session.refresh(row)

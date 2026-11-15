@@ -21,6 +21,8 @@ from fastapi import (
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .audit import build_audit_context
+from .auth import Principal
 from .bus import ObservationBus
 from .config import get_settings
 from .db import GeofenceZone, Observation, get_session
@@ -33,6 +35,8 @@ from .models import (
     AlertReopenIn,
     AlertResolveIn,
     AlertStatsOut,
+    AuditPage,
+    AuthPrincipalOut,
     DroneObservation,
     DroneSummary,
     GeofenceZoneOut,
@@ -42,8 +46,10 @@ from .models import (
 )
 from .pagination import (
     decode_alert_cursor,
+    decode_audit_cursor,
     decode_cursor,
     encode_alert_cursor,
+    encode_audit_cursor,
     encode_cursor,
 )
 from .repository import (
@@ -51,12 +57,15 @@ from .repository import (
     acknowledge_alert,
     alert_event_to_out,
     alert_to_out,
+    append_audit_event,
+    audit_event_to_out,
     drone_to_summary,
     get_alert,
     get_alert_stats,
     get_drone,
     list_alert_events,
     list_alerts,
+    list_audit_events,
     list_drones,
     list_observations,
     list_stations,
@@ -64,12 +73,60 @@ from .repository import (
     reopen_alert,
     resolve_alert,
 )
-from .security import authorize_websocket
+from .security import (
+    authorize_websocket,
+    require_admin,
+    require_operator,
+    require_viewer,
+)
 
 log = get_logger(__name__)
 
 router = APIRouter()
 ws_router = APIRouter()
+
+
+def _effective_actor(principal: Principal, supplied: str | None) -> str:
+    """Use the authenticated identity; retain open-mode compatibility."""
+
+    if principal.authenticated:
+        return principal.actor_name
+    actor = (supplied or "").strip()
+    if not actor:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "actor is required when authentication is disabled; "
+                "configure RID_AUTH_USERS_FILE for verified identities"
+            ),
+        )
+    return actor
+
+
+def _actor_detail(
+    principal: Principal,
+    supplied: str | None,
+) -> dict[str, str]:
+    requested = (supplied or "").strip()
+    if not requested or requested == principal.actor_name:
+        return {}
+    return {"requested_actor": requested}
+
+
+@router.get("/auth/me", response_model=AuthPrincipalOut)
+async def get_auth_me(
+    principal: Annotated[Principal, Depends(require_viewer)],
+) -> AuthPrincipalOut:
+    """Return the effective identity and capabilities for this API key."""
+
+    return AuthPrincipalOut(
+        subject=principal.subject,
+        display_name=principal.display_name,
+        roles=principal.role_names,
+        capabilities=principal.capabilities,
+        authenticated=principal.authenticated,
+        key_id=principal.key_id,
+    )
 
 
 # ── Stations ──────────────────────────────────────────────────────────
@@ -123,6 +180,8 @@ async def get_zones(
 async def upsert_zone(
     zone_id: str,
     body: GeofenceZoneOut,
+    request: Request,
+    principal: Annotated[Principal, Depends(require_admin)],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> GeofenceZoneOut:
     """Create or replace a zone.
@@ -137,6 +196,7 @@ async def upsert_zone(
             detail="polygon needs at least 3 points",
         )
     existing = await session.get(GeofenceZone, zone_id)
+    created = existing is None
     if existing is None:
         session.add(
             GeofenceZone(
@@ -154,6 +214,24 @@ async def upsert_zone(
         existing.min_alt_m = body.min_alt_m
         existing.max_alt_m = body.max_alt_m
         existing.severity = body.severity
+    now = datetime.now(timezone.utc)
+    append_audit_event(
+        session,
+        context=build_audit_context(
+            request,
+            principal,
+            action="zone.upsert",
+            resource_type="zone",
+            resource_id=zone_id,
+            detail={
+                "created": created,
+                "name": body.name,
+                "severity": body.severity,
+                "polygon_points": len(body.polygon),
+            },
+        ),
+        occurred_at=now,
+    )
     await session.commit()
     return GeofenceZoneOut(
         zone_id=zone_id,
@@ -387,11 +465,77 @@ async def get_alert_events_route(
     return [alert_event_to_out(row) for row in rows]
 
 
+@router.get("/audit/events", response_model=AuditPage)
+async def get_audit_events_route(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _principal: Annotated[Principal, Depends(require_admin)],
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    cursor: Annotated[
+        str | None,
+        Query(description="Opaque audit keyset cursor"),
+    ] = None,
+    actor_subject: Annotated[
+        str | None,
+        Query(min_length=1, max_length=128),
+    ] = None,
+    action: Annotated[
+        str | None,
+        Query(min_length=1, max_length=64),
+    ] = None,
+    resource_type: Annotated[
+        str | None,
+        Query(min_length=1, max_length=32),
+    ] = None,
+    resource_id: Annotated[
+        str | None,
+        Query(min_length=1, max_length=128),
+    ] = None,
+    from_: Annotated[
+        datetime | None,
+        Query(alias="from", description="Occurred-at window start"),
+    ] = None,
+    to: Annotated[datetime | None, Query()] = None,
+) -> AuditPage:
+    """Read the append-only security and operator-action audit ledger."""
+
+    since, until = _alert_window(from_, to)
+    before = None
+    if cursor:
+        try:
+            before = decode_audit_cursor(cursor)
+        except ValueError as exc:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+    rows = await list_audit_events(
+        session,
+        limit=limit + 1,
+        before=before,
+        actor_subject=actor_subject,
+        action=action,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        since=since,
+        until=until,
+    )
+    visible = list(rows[:limit])
+    next_cursor = (
+        encode_audit_cursor(visible[-1].occurred_at, visible[-1].event_id)
+        if len(rows) > limit and visible
+        else None
+    )
+    return AuditPage(
+        items=[audit_event_to_out(row) for row in visible],
+        next_cursor=next_cursor,
+    )
+
+
 @router.post("/alerts/{alert_id}/ack", response_model=AlertOut)
 async def acknowledge_alert_route(
     alert_id: str,
     body: AlertAckIn,
     request: Request,
+    principal: Annotated[Principal, Depends(require_operator)],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> AlertOut:
     """Acknowledge an alert once and return the stored audit record.
@@ -399,13 +543,23 @@ async def acknowledge_alert_route(
     Repeated calls are idempotent: the first operator, timestamp and note
     are never overwritten by a retry.
     """
+    actor = _effective_actor(principal, body.acknowledged_by)
+    audit = build_audit_context(
+        request,
+        principal,
+        action="alert.acknowledge",
+        resource_type="alert",
+        resource_id=alert_id,
+        detail=_actor_detail(principal, body.acknowledged_by),
+    )
     try:
         row = await acknowledge_alert(
             session,
             alert_id,
-            acknowledged_by=body.acknowledged_by,
+            acknowledged_by=actor,
             note=body.note,
             enqueue_notification=_notifications_enabled(request),
+            audit=audit,
         )
     except AlertStateConflict as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
@@ -419,15 +573,26 @@ async def resolve_alert_route(
     alert_id: str,
     body: AlertResolveIn,
     request: Request,
+    principal: Annotated[Principal, Depends(require_operator)],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> AlertOut:
     """Resolve an alert and preserve the operator's closing audit record."""
+    actor = _effective_actor(principal, body.resolved_by)
+    audit = build_audit_context(
+        request,
+        principal,
+        action="alert.resolve",
+        resource_type="alert",
+        resource_id=alert_id,
+        detail=_actor_detail(principal, body.resolved_by),
+    )
     row = await resolve_alert(
         session,
         alert_id,
-        resolved_by=body.resolved_by,
+        resolved_by=actor,
         note=body.note,
         enqueue_notification=_notifications_enabled(request),
+        audit=audit,
     )
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="alert not found")
@@ -439,16 +604,27 @@ async def reopen_alert_route(
     alert_id: str,
     body: AlertReopenIn,
     request: Request,
+    principal: Annotated[Principal, Depends(require_operator)],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> AlertOut:
     """Reopen a resolved alert for another handling cycle."""
+    actor = _effective_actor(principal, body.reopened_by)
+    audit = build_audit_context(
+        request,
+        principal,
+        action="alert.reopen",
+        resource_type="alert",
+        resource_id=alert_id,
+        detail=_actor_detail(principal, body.reopened_by),
+    )
     try:
         row = await reopen_alert(
             session,
             alert_id,
-            reopened_by=body.reopened_by,
+            reopened_by=actor,
             note=body.note,
             enqueue_notification=_notifications_enabled(request),
+            audit=audit,
         )
     except AlertStateConflict as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
@@ -759,8 +935,8 @@ async def ws_observations(
     watchdog detect a half-open connection instead of waiting forever for
     ``onclose``.
     """
-    allowed, subprotocol = authorize_websocket(websocket)
-    if not allowed:
+    principal, subprotocol = authorize_websocket(websocket)
+    if principal is None:
         await websocket.close(
             code=status.WS_1008_POLICY_VIOLATION,
             reason="unauthorized",

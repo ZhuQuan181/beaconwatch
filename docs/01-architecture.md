@@ -67,8 +67,9 @@ BeaconWatch 接收无人机广播的 Remote ID（ASTM F3411 / Open Drone ID）�
 │ live map / drone list / replay timeline / alerts / station coverage   │
 └──────────────────────────────────────────────────────────────────────┘
 
-未使用：Redis、PostGIS、JWT/RBAC、MQTT ACL 配置、服务端多副本共享总线。
-可选 Bearer token 与 MQTT TLS 已实现，但不替代完整的身份/授权系统。
+未使用：Redis、PostGIS、OIDC/JWT 身份提供方、MQTT ACL 配置、服务端多副本
+共享总线。具名 API key、RBAC、审计与 MQTT TLS 已实现；OIDC/多副本仍是
+公网生产部署前的剩余项。
 ```
 
 ## 3. 已实现的协议链路
@@ -211,6 +212,21 @@ BeaconWatch 接收无人机广播的 Remote ID（ASTM F3411 / Open Drone ID）�
   `HMAC-SHA256(secret, timestamp + "." + raw_request_body)`，输出
   `sha256=<hex>`。接收端应校验时间窗并拒绝重放。
 
+### 身份、权限与审计
+
+- `RID_AUTH_USERS_FILE` 中的每个条目是独立主体，key 只保存 SHA-256
+  摘要；文件内容变化会在轮询周期内原子替换，坏文件不会淘汰上一份有效
+  凭据。
+- 角色层级为 `viewer < operator < admin`。viewer 只能读取；operator
+  额外可以确认、解决和重开告警；admin 还可以修改禁飞区并读取跨资源
+  审计。
+- HTTP 使用 `Authorization: Bearer <key>`；浏览器 WebSocket 使用
+  `Sec-WebSocket-Protocol: bearer.<key>`，服务端只回显 `rid.v1`，不会
+  把 key 写回握手响应。
+- 认证主体由服务端写入告警状态和审计记录，请求体中的处置人字段不能
+  覆盖它。`alert_events` 保留业务时间线，`audit_events` 保留跨资源的
+  安全访问审计，两者都带 `X-Request-ID` 对应的 request id。
+
 ### HTTP / WebSocket
 
 - `GET /stations`
@@ -274,7 +290,11 @@ WebSocket 推送以下 frame：
 - `alerts` 表保存当前状态、触发次数、首次/最近触发时间、确认与解决字段，
   并按 `(triggered_at, alert_id)`、状态/触发时间、状态/解决时间、无人机/
   触发时间、规则/触发时间和严重度/触发时间建立索引；
-- `alert_events` 表以追加方式保存触发、确认、解决和重开事件，不覆盖历史；
+- `alert_events` 表以追加方式保存触发、确认、解决和重开事件，并记录
+  认证主体与请求 ID；事件不覆盖历史；
+- `audit_events` 表以追加方式保存跨资源的写操作，包括操作者 subject/
+  显示名/角色、请求 ID、动作、资源、结果和请求路径；告警业务事件与
+  安全访问审计相互独立；
 - `notification_outbox` 保存待投递 payload、尝试/失败次数、下次尝试时间、
   租约、死信原因和投递时间；状态与下次尝试时间、状态与更新时间、
   告警与状态均有组合索引；
@@ -290,11 +310,11 @@ WebSocket 推送以下 frame：
 
 ## 10. 安全现状与生产限制
 
-当前 API 支持可选的单个共享 Bearer token，服务端 MQTT 客户端支持校验
-TLS；Compose 默认仍是开发凭据和明文 MQTT。在公网或不可信网络部署前
-必须补齐：
+当前 API 支持具名 API key、viewer/operator/admin RBAC、热加载轮换、请求级
+安全审计和旧版单一 admin token；服务端 MQTT 客户端支持校验 TLS。Compose
+默认仍是开发凭据和明文 MQTT。在公网或不可信网络部署前必须补齐：
 
-1. 用户登录、RBAC、审计日志和 token 轮换（共享 token 只适合单租户/受信网络）；
+1. OIDC/SSO、MFA 或统一身份网关（API key 适合服务和本地运维，不替代人员登录）；
 2. HTTPS/WSS 反向代理；
 3. MQTT ACL、每站客户端证书/账号和 Broker 侧 TLS 配置；
 4. 密钥管理、数据库最小权限、非默认密码；
@@ -316,7 +336,7 @@ docs/       架构、部署、测试文档
 
 ## 12. 后续优先级
 
-1. RBAC/审计、MQTT ACL、密钥轮换与生产 TLS 渗透测试；
+1. OIDC/SSO、MQTT ACL、密钥托管与生产 TLS 渗透测试；
 2. 多站定位/时差融合与轨迹质量评分；
 3. 多副本共享 WebSocket 总线；
 4. 真实无人机/抓包回放集与现场验收基线。

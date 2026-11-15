@@ -107,7 +107,7 @@ class StationInfo(BaseModel):
     station_id: str = Field(min_length=1, max_length=64)
     location: Position
     name: str | None = Field(default=None, max_length=128)
-    firmware_version: str = Field(default="0.7.0", max_length=32)
+    firmware_version: str = Field(default="0.8.0", max_length=32)
     capabilities: list[str] = Field(default_factory=lambda: ["ble", "wifi_nan"])
 
 
@@ -174,12 +174,16 @@ class AlertAckIn(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    acknowledged_by: str = Field(min_length=1, max_length=128)
+    acknowledged_by: str | None = Field(default=None, max_length=128)
     note: str = Field(default="", max_length=1000)
 
     @field_validator("acknowledged_by")
     @classmethod
-    def acknowledged_by_must_not_be_blank(cls, value: str) -> str:
+    def acknowledged_by_must_not_be_blank(
+        cls, value: str | None
+    ) -> str | None:
+        if value is None:
+            return value
         value = value.strip()
         if not value:
             raise ValueError("acknowledged_by must not be blank")
@@ -191,12 +195,16 @@ class AlertResolveIn(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    resolved_by: str = Field(min_length=1, max_length=128)
+    resolved_by: str | None = Field(default=None, max_length=128)
     note: str = Field(default="", max_length=1000)
 
     @field_validator("resolved_by")
     @classmethod
-    def resolved_by_must_not_be_blank(cls, value: str) -> str:
+    def resolved_by_must_not_be_blank(
+        cls, value: str | None
+    ) -> str | None:
+        if value is None:
+            return value
         value = value.strip()
         if not value:
             raise ValueError("resolved_by must not be blank")
@@ -208,12 +216,16 @@ class AlertReopenIn(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    reopened_by: str = Field(min_length=1, max_length=128)
+    reopened_by: str | None = Field(default=None, max_length=128)
     note: str = Field(default="", max_length=1000)
 
     @field_validator("reopened_by")
     @classmethod
-    def reopened_by_must_not_be_blank(cls, value: str) -> str:
+    def reopened_by_must_not_be_blank(
+        cls, value: str | None
+    ) -> str | None:
+        if value is None:
+            return value
         value = value.strip()
         if not value:
             raise ValueError("reopened_by must not be blank")
@@ -232,9 +244,49 @@ class AlertEventOut(BaseModel):
         "reopened",
     ]
     actor: str | None = None
+    actor_subject: str | None = None
+    request_id: str | None = None
     note: str | None = None
     at: str
     detail: dict = Field(default_factory=dict)
+
+
+class AuthPrincipalOut(BaseModel):
+    """Effective identity and capabilities for the dashboard."""
+
+    subject: str
+    display_name: str
+    roles: list[str] = Field(default_factory=list)
+    capabilities: list[str] = Field(default_factory=list)
+    authenticated: bool
+    key_id: str | None = None
+
+
+class AuditEventOut(BaseModel):
+    """One append-only API mutation audit row."""
+
+    event_id: str
+    at: str
+    request_id: str | None = None
+    actor_subject: str | None = None
+    actor_name: str | None = None
+    actor_roles: list[str] = Field(default_factory=list)
+    authenticated: bool = False
+    action: str
+    resource_type: str
+    resource_id: str
+    outcome: Literal["success", "noop"] = "success"
+    method: str
+    path: str
+    status_code: int
+    detail: dict = Field(default_factory=dict)
+
+
+class AuditPage(BaseModel):
+    """Keyset-paginated security audit page."""
+
+    items: list[AuditEventOut]
+    next_cursor: str | None = None
 
 
 class DroneSummary(BaseModel):

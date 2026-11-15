@@ -426,7 +426,7 @@ export function useObservationsStream(
         connected: false,
         error:
           event.code === 1008
-            ? "WebSocket unauthorized — check VITE_API_TOKEN"
+            ? "WebSocket unauthorized — check the configured API key"
             : s.error,
       }));
       const delay = backoffRef.current + Math.random() * 200;

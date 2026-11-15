@@ -36,7 +36,11 @@ PYTHONPATH=server/src .venv/bin/python -m pytest -q server/tests
 - 入库、幂等、drone 聚合、站点心跳；
 - 乱序观测不倒退 last_seen、重复消息不重复计数/下发；
 - REST 查询、时间窗口、bbox、未识别过滤、游标分页；
-- 可选 Bearer 鉴权、请求 ID、安全响应头；
+- 具名 API key、viewer/operator/admin RBAC、未知/无效 key、key 文件热加载、
+  格式错误时保留上一份有效凭据、WebSocket subprotocol 鉴权；
+- 已认证操作者覆盖客户端 actor、告警事件中的 subject/request ID、
+  跨资源安全审计、角色拒绝、审计过滤和游标分页；
+- 可选旧版 admin Bearer token、请求 ID、安全响应头；
 - WebSocket 心跳、fan-out、慢消费者丢弃策略；
 - 禁飞区/限高/未识别告警；
 - 稳定 alert ID；
@@ -101,14 +105,14 @@ npm run build
 CI 会构建服务端镜像并校验 Compose 配置。发布前人工验证应使用独立 Compose
 project、独立端口和独立数据卷，不要对现有生产卷执行 `down -v`。预期结果：
 
-1. 空库启动时自动执行全部 Alembic 迁移（当前到 `0008`）；
+1. 空库启动时自动执行全部 Alembic 迁移（当前到 `0009`）；
 2. `/health/ready` 返回 200；
 3. `/metrics` 显示 MQTT 已连接；
 4. 测试容器和测试卷可以独立删除。
 
 升级发布还需验证上一版的 schema 升级：已有告警、审计事件和确认状态必须
-保留，`notification_outbox` 应新增且为待投递状态，新的告警游标/清理索引
-必须存在；旧进程重启后应继续处理到期通知。
+保留，`notification_outbox` 应新增且为待投递状态，`audit_events` 与
+`alert_events` 的新增身份列/索引必须存在；旧进程重启后应继续处理到期通知。
 
 ## 3. 官方 golden vectors
 
@@ -144,4 +148,4 @@ https://github.com/opendroneid/opendroneid-core-c
 - 多机高并发/容量压测；
 - 多副本服务端和共享总线的故障切换；
 - 浏览器端 E2E/视觉回归；
-- 生产 TLS、认证和 MQTT ACL 的渗透测试。
+- OIDC/MFA 与生产 TLS、MQTT ACL 的渗透测试。

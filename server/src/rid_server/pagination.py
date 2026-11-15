@@ -99,3 +99,35 @@ def decode_alert_cursor(value: str) -> tuple[datetime, str]:
         return triggered_at.astimezone(timezone.utc), alert_id
     except (ValueError, TypeError, KeyError) as exc:
         raise ValueError("invalid alert cursor") from exc
+
+
+def encode_audit_cursor(occurred_at: datetime, event_id: str) -> str:
+    if occurred_at.tzinfo is None:
+        occurred_at = occurred_at.replace(tzinfo=timezone.utc)
+    payload = {
+        "kind": "audit",
+        "v": 1,
+        "occurred_at": occurred_at.astimezone(timezone.utc).isoformat(),
+        "event_id": event_id,
+    }
+    return _encode_payload(payload)
+
+
+def decode_audit_cursor(value: str) -> tuple[datetime, str]:
+    """Decode an audit cursor, rejecting foreign cursor types."""
+    try:
+        payload = _decode_payload(value)
+        if payload.get("kind") != "audit" or payload.get("v") != 1:
+            raise ValueError("invalid audit cursor")
+        occurred_at_value = payload["occurred_at"]
+        event_id = payload["event_id"]
+        if not isinstance(occurred_at_value, str):
+            raise ValueError("invalid audit cursor")
+        if not isinstance(event_id, str) or not event_id:
+            raise ValueError("invalid audit cursor")
+        occurred_at = datetime.fromisoformat(occurred_at_value)
+        if occurred_at.tzinfo is None:
+            occurred_at = occurred_at.replace(tzinfo=timezone.utc)
+        return occurred_at.astimezone(timezone.utc), event_id
+    except (ValueError, TypeError, KeyError) as exc:
+        raise ValueError("invalid audit cursor") from exc

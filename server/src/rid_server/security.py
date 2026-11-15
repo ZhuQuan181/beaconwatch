@@ -1,58 +1,102 @@
-"""Optional API authentication and HTTP hardening middleware."""
+"""Named API-key authentication, RBAC dependencies and HTTP hardening."""
 from __future__ import annotations
 
 import re
-import secrets
 import uuid
-from typing import Any
+from typing import Annotated, Any
 
 import structlog
-from fastapi import HTTPException, Request, status
+from fastapi import Depends, HTTPException, Request, status
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from .auth import AuthStore, Principal, Role
 from .config import Settings, get_settings
 from .metrics import RequestMetrics
 
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
-_WS_SUBPROTOCOL = "rid.v1"
 
 
 def _settings_for_app(app: Any) -> Settings:
     return getattr(app.state, "settings", None) or get_settings()
 
 
-def _api_token(settings: Settings) -> str:
-    secret = settings.api_token
-    return secret.get_secret_value() if secret is not None else ""
+def _auth_store_for_app(app: Any) -> AuthStore:
+    settings = _settings_for_app(app)
+    store = getattr(app.state, "auth", None)
+    if not isinstance(store, AuthStore) or store.settings is not settings:
+        store = AuthStore(settings)
+        app.state.auth = store
+    return store
 
 
-def _bearer_matches(header: str | None, expected: str) -> bool:
-    if not header:
-        return False
-    scheme, _, credentials = header.partition(" ")
-    return scheme.lower() == "bearer" and secrets.compare_digest(
-        credentials.strip(), expected
+def _unauthorized(request: Request) -> HTTPException:
+    metrics = getattr(request.app.state, "metrics", None)
+    if metrics is not None:
+        metrics.auth_failures += 1
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="invalid or missing API key",
+        headers={"WWW-Authenticate": "Bearer"},
     )
 
 
-def require_api_token(request: Request) -> None:
-    """FastAPI dependency: open when no token is configured, else Bearer only."""
-    settings = _settings_for_app(request.app)
-    expected = _api_token(settings)
-    if expected and not _bearer_matches(request.headers.get("authorization"), expected):
-        metrics = getattr(request.app.state, "metrics", None)
-        if metrics is not None:
-            metrics.auth_failures += 1
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="invalid or missing API token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+def _forbidden(request: Request, required: Role) -> HTTPException:
+    metrics = getattr(request.app.state, "metrics", None)
+    if metrics is not None:
+        metrics.authz_failures += 1
+    return HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=f"{required.value} role required",
+    )
 
 
-def authorize_websocket(websocket: Any) -> tuple[bool, str | None]:
-    """Check a WebSocket handshake and return (allowed, subprotocol).
+def get_current_principal(request: Request) -> Principal:
+    """Resolve the caller or return an explicit open-mode principal."""
+
+    store = _auth_store_for_app(request.app)
+    request.state.auth_store = store
+    principal = store.resolve_http(request.headers)
+    if principal is None:
+        raise _unauthorized(request)
+    request.state.principal = principal
+    return principal
+
+
+def require_viewer(
+    principal: Annotated[Principal, Depends(get_current_principal)],
+) -> Principal:
+    """Require read access (or open mode)."""
+
+    return principal
+
+
+def require_operator(
+    request: Request,
+    principal: Annotated[Principal, Depends(get_current_principal)],
+) -> Principal:
+    """Require alert disposition privileges."""
+
+    if not principal.has_role(Role.OPERATOR):
+        raise _forbidden(request, Role.OPERATOR)
+    return principal
+
+
+def require_admin(
+    request: Request,
+    principal: Annotated[Principal, Depends(get_current_principal)],
+) -> Principal:
+    """Require configuration and audit privileges."""
+
+    if not principal.has_role(Role.ADMIN):
+        raise _forbidden(request, Role.ADMIN)
+    return principal
+
+
+def authorize_websocket(
+    websocket: Any,
+) -> tuple[Principal | None, str | None]:
+    """Check a WebSocket handshake and return (principal, subprotocol).
 
     Browsers cannot attach an Authorization header to a WebSocket.  The
     dashboard therefore offers the token as a ``bearer.<token>``
@@ -60,30 +104,14 @@ def authorize_websocket(websocket: Any) -> tuple[bool, str | None]:
     reverse proxy can still inject an Authorization header for non-browser
     clients.
     """
-    settings = _settings_for_app(websocket.app)
-    offered = [
-        item.strip()
-        for item in (websocket.headers.get("sec-websocket-protocol") or "").split(",")
-        if item.strip()
-    ]
-    accept_protocol = _WS_SUBPROTOCOL if _WS_SUBPROTOCOL in offered else None
-    expected = _api_token(settings)
-    if not expected:
-        return True, accept_protocol
-
-    authorization = websocket.headers.get("authorization")
-    if _bearer_matches(authorization, expected):
-        return True, accept_protocol
-    for protocol in offered:
-        prefix = "bearer."
-        if protocol.startswith(prefix) and secrets.compare_digest(
-            protocol[len(prefix):], expected
-        ):
-            return True, accept_protocol
+    store = _auth_store_for_app(websocket.app)
+    principal, accept_protocol = store.resolve_websocket(websocket)
+    if principal is not None and principal.has_role(Role.VIEWER):
+        return principal, accept_protocol
     metrics = getattr(websocket.app.state, "metrics", None)
     if metrics is not None:
         metrics.auth_failures += 1
-    return False, accept_protocol
+    return None, accept_protocol
 
 
 class RequestContextMiddleware:
@@ -102,6 +130,8 @@ class RequestContextMiddleware:
         request_id = headers.get("x-request-id", "")
         if not _REQUEST_ID_RE.fullmatch(request_id):
             request_id = uuid.uuid4().hex
+        state = scope.setdefault("state", {})
+        state["request_id"] = request_id
 
         started_at = self.metrics.begin()
         status_code = 500

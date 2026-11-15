@@ -83,6 +83,8 @@ export function AlertPanel({
   alertsLoading = false,
   alertsError,
   onLoadOlder,
+  currentActor,
+  canOperate = true,
 }: {
   alerts: Alert[];
   onSelectDrone?: (droneId: string) => void;
@@ -107,6 +109,8 @@ export function AlertPanel({
   alertsLoading?: boolean;
   alertsError?: string | null;
   onLoadOlder?: () => Promise<number>;
+  currentActor?: string | null;
+  canOperate?: boolean;
 }) {
   const [operator, setOperator] = useState(() => {
     try {
@@ -150,7 +154,9 @@ export function AlertPanel({
     (alert) => alert.severity === "critical",
   ).length;
   const visible = sorted.filter((alert) => matchesFilter(alert, filter));
-  const canAct = Boolean(onAcknowledge || onResolve || onReopen);
+  const canAct = Boolean(
+    canOperate && (onAcknowledge || onResolve || onReopen),
+  );
 
   const persistOperator = (value: string) => {
     setOperator(value);
@@ -176,7 +182,7 @@ export function AlertPanel({
   ) => {
     event.stopPropagation();
     if (busy || !canAct) return;
-    const actor = operator.trim();
+    const actor = (currentActor ?? operator).trim();
     if (!actor) {
       setActionError("请先填写处置人");
       return;
@@ -325,22 +331,31 @@ export function AlertPanel({
 
       {canAct && (
         <div className="alert-tools">
-          <label>
-            <span>处置人</span>
-            <input
-              value={operator}
-              onChange={(event) => persistOperator(event.target.value)}
-              onBlur={() => {
-                try {
-                  window.localStorage.setItem("rid.operator", operator.trim());
-                } catch {
-                  /* ignore storage failure */
-                }
-              }}
-              maxLength={128}
-              aria-label="告警处置人"
-            />
-          </label>
+          {currentActor ? (
+            <span className="alert-actor-badge">
+              处置身份 <strong>{currentActor}</strong>
+            </span>
+          ) : (
+            <label>
+              <span>处置人</span>
+              <input
+                value={operator}
+                onChange={(event) => persistOperator(event.target.value)}
+                onBlur={() => {
+                  try {
+                    window.localStorage.setItem(
+                      "rid.operator",
+                      operator.trim(),
+                    );
+                  } catch {
+                    /* ignore storage failure */
+                  }
+                }}
+                maxLength={128}
+                aria-label="告警处置人"
+              />
+            </label>
+          )}
           <label className="alert-note-field">
             <span>备注</span>
             <input

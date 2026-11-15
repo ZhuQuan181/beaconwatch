@@ -18,6 +18,7 @@ class RequestMetrics:
         self.requests_total = 0
         self.duration_sum = 0.0
         self.auth_failures = 0
+        self.authz_failures = 0
         self._responses: dict[tuple[str, str, int], int] = defaultdict(int)
 
     def begin(self) -> float:
@@ -52,6 +53,9 @@ class RequestMetrics:
             "# HELP rid_http_auth_failures_total Rejected Bearer-token attempts.",
             "# TYPE rid_http_auth_failures_total counter",
             f"rid_http_auth_failures_total {self.auth_failures}",
+            "# HELP rid_http_authz_failures_total Authenticated calls denied by role.",
+            "# TYPE rid_http_authz_failures_total counter",
+            f"rid_http_authz_failures_total {self.authz_failures}",
             "# HELP rid_process_uptime_seconds Process uptime.",
             "# TYPE rid_process_uptime_seconds gauge",
             f"rid_process_uptime_seconds {time.monotonic() - self.started_at:.3f}",

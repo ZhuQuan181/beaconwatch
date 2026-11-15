@@ -8,7 +8,11 @@ import { AlertPanel } from "./components/AlertPanel";
 import { useObservationsStream } from "./hooks/useObservationsStream";
 import { usePresence } from "./hooks/usePresence";
 import { api } from "./api/client";
-import type { DroneObservation, GeofenceZone } from "./types";
+import type {
+  AuthPrincipal,
+  DroneObservation,
+  GeofenceZone,
+} from "./types";
 
 /** How far back the history buffer reaches, for the timeline window. */
 const HISTORY_LIMIT = 1000;
@@ -54,6 +58,16 @@ export function App() {
   const [replayLoading, setReplayLoading] = useState(false);
   const [ghostIds, setGhostIds] = useState<string[]>([]);
   const [zones, setZones] = useState<GeofenceZone[]>([]);
+  const [auth, setAuth] = useState<AuthPrincipal | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    api
+      .getAuthMe(controller.signal)
+      .then(setAuth)
+      .catch(() => setAuth(null));
+    return () => controller.abort();
+  }, []);
 
   // Zones are static for a session; fetch once.
   useEffect(() => {
@@ -200,6 +214,9 @@ export function App() {
   }
   const latestDrones = Array.from(latestByDrone.values());
   const droneCount = latestDrones.length;
+  const canOperate =
+    auth === null || auth.capabilities.includes("alerts:write");
+  const actorName = auth?.authenticated ? auth.display_name : null;
 
   return (
     <div className={`app ${isReplay ? "app--replay" : ""}`}>
@@ -217,6 +234,18 @@ export function App() {
         <span className="spacer" />
         <span className="stat">
           {stations.length} station · {droneCount} drone
+        </span>
+        <span
+          className="stat auth-identity"
+          title={
+            auth
+              ? `roles: ${auth.roles.join(", ")} · ${
+                  auth.authenticated ? "authenticated" : "open mode"
+                }`
+              : "authentication unavailable"
+          }
+        >
+          {auth?.authenticated ? auth.display_name : "open mode"}
         </span>
         <ConnectionBadge />
       </header>
@@ -247,15 +276,17 @@ export function App() {
           <AlertPanel
             alerts={alerts}
             onSelectDrone={setSelected}
-            onAcknowledge={acknowledgeAlert}
-            onResolve={resolveAlert}
-            onReopen={reopenAlert}
+            onAcknowledge={canOperate ? acknowledgeAlert : undefined}
+            onResolve={canOperate ? resolveAlert : undefined}
+            onReopen={canOperate ? reopenAlert : undefined}
             onLoadHistory={loadAlertHistory}
             alertStats={alertStats}
             hasMoreAlerts={Boolean(alertNextCursor)}
             alertsLoading={alertsLoading}
             alertsError={alertsError}
             onLoadOlder={loadOlderAlerts}
+            currentActor={actorName}
+            canOperate={canOperate}
           />
         </div>
 

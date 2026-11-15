@@ -10,6 +10,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from sqlalchemy import text
 
 from .alerts import AlertEngine, AlertRing
+from .auth import AuthStore
 from .bus import ObservationBus
 from .config import get_settings
 from .db import dispose_engine, get_session_factory
@@ -24,7 +25,7 @@ from .repository import (
 )
 from .retention import RetentionWorker
 from .routes import router, ws_router
-from .security import RequestContextMiddleware, require_api_token
+from .security import RequestContextMiddleware, require_viewer
 from .settings_state import set_subscriber_bus_hook
 
 log = get_logger(__name__)
@@ -116,12 +117,13 @@ def create_app() -> FastAPI:
     request_metrics = RequestMetrics()
     app = FastAPI(
         title="RID Server",
-        version="0.7.0",
+        version="0.8.0",
         lifespan=lifespan,
     )
     app.state.settings = settings
     app.state.metrics = request_metrics
-    app.include_router(router, dependencies=[Depends(require_api_token)])
+    app.state.auth = AuthStore(settings)
+    app.include_router(router, dependencies=[Depends(require_viewer)])
     app.include_router(ws_router)
 
     if settings.cors_origin_list:
@@ -168,6 +170,12 @@ def create_app() -> FastAPI:
         notifier = getattr(request.app.state, "notifier", None)
         retention = getattr(request.app.state, "retention", None)
         values = {
+            "rid_auth_required": int(
+                bool(getattr(request.app.state, "auth", None) and request.app.state.auth.required)
+            ),
+            "rid_auth_principals": int(
+                getattr(getattr(request.app.state, "auth", None), "principal_count", 0)
+            ),
             "rid_mqtt_connected": int(bool(getattr(subscriber, "connected", False))),
             "rid_mqtt_received_total": int(getattr(subscriber, "received", 0)),
             "rid_mqtt_persisted_total": int(getattr(subscriber, "persisted", 0)),

@@ -122,6 +122,33 @@ export interface AlertEvent {
   detail: Record<string, unknown>;
 }
 
+export interface AuthPrincipal {
+  subject: string;
+  display_name: string;
+  roles: string[];
+  capabilities: string[];
+  authenticated: boolean;
+  key_id?: string | null;
+}
+
+export interface AuditEvent {
+  event_id: string;
+  at: string;
+  request_id?: string | null;
+  actor_subject?: string | null;
+  actor_name?: string | null;
+  actor_roles: string[];
+  authenticated: boolean;
+  action: string;
+  resource_type: string;
+  resource_id: string;
+  outcome: "success" | "noop";
+  method: string;
+  path: string;
+  status_code: number;
+  detail: Record<string, unknown>;
+}
+
 /** Frame sent by the server over /ws/observations. */
 export type WsFrame =
   | { type: "obs"; data: DroneObservation }

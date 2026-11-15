@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 
 import pytest
@@ -175,6 +176,60 @@ async def test_websocket_requires_bearer_subprotocol_when_configured(
         async with websockets.connect(
             url,
             subprotocols=["rid.v1", "bearer.ws-secret"],
+        ) as ws:
+            assert ws.subprotocol == "rid.v1"
+    finally:
+        server.should_exit = True
+        await asyncio.wait_for(server_task, timeout=2.0)
+
+
+async def test_websocket_accepts_named_viewer_key(
+    db_engine, _sqlite_settings, unused_tcp_port: int, tmp_path
+):
+    import uvicorn
+
+    api_key = "viewer-ws-secret"
+    key_file = tmp_path / "ws-keys.json"
+    key_file.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "keys": [
+                    {
+                        "key_id": "viewer-ws",
+                        "subject": "viewer-ws",
+                        "display_name": "WebSocket Viewer",
+                        "roles": ["viewer"],
+                        "api_key_sha256": hashlib.sha256(
+                            api_key.encode()
+                        ).hexdigest(),
+                        "enabled": True,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    app = create_app()
+    app.state.settings = Settings(auth_users_file=str(key_file))
+    config = uvicorn.Config(
+        app, host="127.0.0.1", port=unused_tcp_port, log_level="warning"
+    )
+    server = uvicorn.Server(config)
+    server_task = asyncio.create_task(server.serve())
+    url = f"ws://127.0.0.1:{unused_tcp_port}/ws/observations"
+    try:
+        for _ in range(50):
+            if server.started:
+                break
+            await asyncio.sleep(0.05)
+        assert server.started
+        with pytest.raises(InvalidStatus):
+            async with websockets.connect(url):
+                pass
+        async with websockets.connect(
+            url,
+            subprotocols=["rid.v1", f"bearer.{api_key}"],
         ) as ws:
             assert ws.subprotocol == "rid.v1"
     finally:

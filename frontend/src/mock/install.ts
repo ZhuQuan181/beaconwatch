@@ -239,6 +239,20 @@ function handleApi(url: URL, init: RequestInit): Response {
   switch (url.pathname) {
     case "/api/health":
       return jsonResponse({ status: "ok" });
+    case "/api/auth/me":
+      return jsonResponse({
+        subject: "demo",
+        display_name: "Demo operator",
+        roles: ["admin"],
+        capabilities: [
+          "data:read",
+          "alerts:write",
+          "zones:write",
+          "audit:read",
+        ],
+        authenticated: false,
+        key_id: null,
+      });
     case "/api/stations":
       return jsonResponse(stations);
     case "/api/drones":

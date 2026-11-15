@@ -11,6 +11,7 @@ import type {
   AlertEvent,
   AlertPage,
   AlertStats,
+  AuthPrincipal,
   DroneObservation,
   DroneSummary,
   GeofenceZone,
@@ -200,6 +201,9 @@ function alertQueryString(params: AlertQuery): string {
 export const api = {
   health: (signal?: AbortSignal) =>
     jsonGet<{ status: string }>("/health", { signal }),
+
+  getAuthMe: (signal?: AbortSignal) =>
+    jsonGet<AuthPrincipal>("/auth/me", { signal }),
 
   listStations: (signal?: AbortSignal) =>
     jsonGet<Station[]>("/stations", { signal }),

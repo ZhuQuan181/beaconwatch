@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.8.0 - 2026-11-16
+
+### Added
+
+- Named API-key identities backed by a hot-reloadable JSON credential file,
+  with SHA-256 digests, key IDs, subjects, display names, enable/disable
+  flags and duplicate/format validation.
+- Viewer, operator and admin RBAC. Read routes require viewer; alert
+  disposition requires operator; zone changes and cross-resource audit
+  require admin.
+- `GET /auth/me`, `GET /audit/events` with filters and keyset pagination,
+  and `rid_auth_required`, `rid_auth_principals` and
+  `rid_http_authz_failures_total` metrics.
+- Per-request security audit rows for alert and zone mutations, written in
+  the same transaction as the domain change with actor subject, display name,
+  roles, request ID, outcome and resource identifiers.
+- Alert events now retain the authenticated subject and request ID alongside
+  the human-readable actor.
+- Dashboard identity display, role-aware alert controls and static-demo
+  `/auth/me` support.
+- Alembic `0009` for the audit ledger and alert-event identity columns, plus
+  authentication, RBAC, rotation, audit and WebSocket tests.
+
+### Changed
+
+- Authenticated callers cannot spoof `acknowledged_by`, `resolved_by` or
+  `reopened_by`; the authenticated display name is authoritative. Those body
+  fields are optional when a key is configured and remain usable in open mode.
+- `RID_API_TOKEN` is retained as a single administrator compatibility
+  credential; `RID_AUTH_USERS_FILE` is the preferred least-privilege setup.
+- Repository/package metadata advanced to 0.8.0.
+
 ## 0.7.0 - 2026-11-16
 
 ### Added

@@ -43,54 +43,97 @@ make reset
 
 开发/演示的默认数据库凭据写在 Compose 中，生产环境必须替换。
 
-### 可选 API 鉴权
+### 身份认证、RBAC 与审计
 
-默认不设 token，方便本地演示。设置 `RID_API_TOKEN` 后，所有数据 REST
-路由和 `/ws/observations` 都要求 Bearer token；`/health*` 与 `/metrics`
+默认不连接任何凭据文件，方便本地演示。生产环境应配置
+`RID_AUTH_USERS_FILE`。一旦配置该文件或旧版 `RID_API_TOKEN`，所有数据
+REST 路由和 `/ws/observations` 都要求 API key；`/health*` 与 `/metrics`
 保持公开，供探针和 Prometheus 使用。
 
+| 角色 | 能力 |
+|---|---|
+| `viewer` | 读取地图、观测、告警、统计和告警审计时间线 |
+| `operator` | viewer + 确认/解决/重新打开告警 |
+| `admin` | operator + 修改禁飞区 + 读取跨资源安全审计 |
+
+生成一个具名 key：
+
 ```bash
-export RID_API_TOKEN="$(openssl rand -hex 24)"
-# 浏览器构建时注入同一 token（注意：Vite 变量会进入 JS bundle）
-cd frontend
-VITE_API_TOKEN="$RID_API_TOKEN" npm run build
+python scripts/generate_api_key.py \
+  --subject ops-7 \
+  --name "Operator 7" \
+  --role operator
 ```
+
+命令只输出一次原始 key；服务端文件只保存 `api_key_sha256`。把多个条目放进
+同一个 JSON 文件：
+
+```json
+{
+  "version": 1,
+  "keys": [
+    {
+      "key_id": "ops-7-a",
+      "subject": "ops-7",
+      "display_name": "Operator 7",
+      "roles": ["operator"],
+      "api_key_sha256": "<64 hex characters>",
+      "enabled": true
+    }
+  ]
+}
+```
+
+挂载并启用：
+
+```bash
+export RID_AUTH_USERS_FILE=/run/secrets/beaconwatch-keys.json
+export RID_AUTH_RELOAD_INTERVAL_S=5
+```
+
+```yaml
+services:
+  rid-server:
+    volumes:
+      - /etc/beaconwatch/keys.json:/run/secrets/beaconwatch-keys.json:ro
+```
+
+文件内容变化后最多等待一个 `RID_AUTH_RELOAD_INTERVAL_S` 周期即可生效，
+无需重启；格式错误时继续使用上一份有效 key，并记录
+`auth.reload.invalid` 日志。这样可以在不完全中断服务的情况下撤销或轮换
+凭据。key 必须由至少 32 字节随机数生成，不能使用人工密码；通用密码认证
+应交给 OIDC/反向代理。
 
 浏览器 WebSocket 不能自定义 Authorization 头，因此前端通过
-`Sec-WebSocket-Protocol` 传递 `bearer.<token>`。共享 token 只适合单租户/
-受信网络；公网部署仍应使用反向代理、身份网关和 TLS。
-
-告警查询与生命周期接口使用同一鉴权：
+`Sec-WebSocket-Protocol: bearer.<key>` 传递凭据。前端构建时注入一个
+key（Vite 变量会进入 JS bundle，公开展示屏应使用 viewer key）：
 
 ```bash
-curl -s -H "Authorization: Bearer $RID_API_TOKEN" \
-  http://localhost:8000/alerts
+cd frontend
+VITE_API_TOKEN="$VIEWER_KEY" npm run build
+```
+
+```bash
+curl -s -H "Authorization: Bearer $OPERATOR_KEY" \
+  http://localhost:8000/auth/me
+
 curl -s -X POST \
-  -H "Authorization: Bearer $RID_API_TOKEN" \
+  -H "Authorization: Bearer $OPERATOR_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"acknowledged_by":"operator-7","note":"已派发现场核查"}' \
+  -d '{"note":"已派发现场核查"}' \
   "http://localhost:8000/alerts/$ALERT_ID/ack"
 
-curl -s -X POST \
-  -H "Authorization: Bearer $RID_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"resolved_by":"operator-7","note":"现场核查完成"}' \
-  "http://localhost:8000/alerts/$ALERT_ID/resolve"
-
-curl -s -X POST \
-  -H "Authorization: Bearer $RID_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"reopened_by":"operator-7","note":"发现新的航迹"}' \
-  "http://localhost:8000/alerts/$ALERT_ID/reopen"
-
-curl -s -H "Authorization: Bearer $RID_API_TOKEN" \
-  "http://localhost:8000/alerts/$ALERT_ID/events"
-
-curl -s -H "Authorization: Bearer $RID_API_TOKEN" \
-  "http://localhost:8000/alerts/page?limit=50"
-curl -s -H "Authorization: Bearer $RID_API_TOKEN" \
-  "http://localhost:8000/alerts/stats"
+curl -s -H "Authorization: Bearer $ADMIN_KEY" \
+  "http://localhost:8000/audit/events?limit=50"
 ```
+
+认证成功后，`acknowledged_by`/`resolved_by`/`reopened_by` 由服务端身份
+覆盖，客户端不能伪造处置人；请求体中的同名字段可以省略。旧版
+`RID_API_TOKEN` 保留为 `admin` 兼容凭据。`GET /auth/me` 返回有效角色和
+能力，`GET /audit/events` 返回按时间倒序的跨资源审计记录（可用
+`actor_subject`、`action`、`resource_type`、`resource_id`、`from`、`to`
+和游标筛选）。告警自身的事件时间线仍由
+`GET /alerts/{alert_id}/events` 提供。
 
 `status=active` 可以只查询未关闭告警，也支持按 `rule`、`drone_id`、`from`
 和 `to` 过滤。首次确认和解决均写入操作员、时间与备注；重复确认或解决返回
@@ -241,6 +284,9 @@ curl -s http://localhost:8000/metrics
 - `rid_retention_alerts_deleted_total`、
   `rid_retention_notifications_deleted_total`、
   `rid_retention_failures_total` 和最近成功时间用于监控清理任务。
+- `rid_auth_required`、`rid_auth_principals`、
+  `rid_http_auth_failures_total` 和 `rid_http_authz_failures_total`
+  用于确认鉴权已启用，以及发现错误 key/越权尝试。
 
 ## 5. 端到端验证
 
@@ -258,7 +304,7 @@ receiver、pipeline、EMQX、数据库和 FastAPI，最后通过 HTTP 检查协�
 升级镜像：
 
 ```bash
-docker build -t beaconwatch-server:0.7.0 ./server
+docker build -t beaconwatch-server:0.8.0 ./server
 docker compose -f server/docker-compose.yml up -d --build rid-server
 ```
 
@@ -281,7 +327,7 @@ cat beaconwatch-YYYYMMDD-HHMMSS.dump | \
 ## 7. 生产部署检查表
 
 - [ ] 替换数据库默认密码，使用 secret manager；
-- [ ] 设置 `RID_API_TOKEN`，并替换为具备授权/审计/轮换能力的身份方案；
+- [ ] 使用 `RID_AUTH_USERS_FILE` 配置具名、最小权限的 API key，并演练轮换；
 - [ ] 使用 HTTPS/WSS 反向代理；
 - [ ] 为 MQTT 配置 TLS（`RID_MQTT_CA_CERT` 等）、独立站点账号和 ACL；
 - [ ] 限制 5433/1883/18083/8000 的暴露范围；

@@ -18,6 +18,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import os
 import sys
 import threading
 import uuid
@@ -282,7 +283,10 @@ async def main() -> int:
     app.state.settings = settings
     transport = httpx.ASGITransport(app=app)
     headers: dict[str, str] = {}
-    if base_settings.api_token is not None:
+    e2e_api_token = os.environ.get("RID_E2E_API_TOKEN", "").strip()
+    if e2e_api_token:
+        headers["Authorization"] = f"Bearer {e2e_api_token}"
+    elif base_settings.api_token is not None:
         headers["Authorization"] = (
             f"Bearer {base_settings.api_token.get_secret_value()}"
         )
@@ -291,6 +295,15 @@ async def main() -> int:
         base_url="http://t",
         headers=headers,
     ) as client:
+        me_response = await client.get("/auth/me")
+        me_response.raise_for_status()
+        me = me_response.json()
+        expected_actor = (
+            me["display_name"]
+            if me.get("authenticated")
+            else "e2e-operator"
+        )
+        audit_actor = me["display_name"]
         response = await client.get("/observations", params={"limit": 50})
         response.raise_for_status()
         rows = [
@@ -312,6 +325,7 @@ async def main() -> int:
         reopened = None
         final_resolution = None
         alert_events = None
+        audit_events = None
         alert_page = None
         alert_stats = None
         if run_alerts:
@@ -368,6 +382,15 @@ async def main() -> int:
             )
             events_response.raise_for_status()
             alert_events = events_response.json()
+            audit_response = await client.get(
+                "/audit/events",
+                params={
+                    "action": "alert.acknowledge",
+                    "resource_id": alert["alert_id"],
+                },
+            )
+            audit_response.raise_for_status()
+            audit_events = audit_response.json().get("items", [])
             page_response = await client.get(
                 "/alerts/page",
                 params={"limit": 1, "drone_id": ghost.drone_id},
@@ -437,6 +460,7 @@ async def main() -> int:
             or reopened is None
             or final_resolution is None
             or alert_events is None
+            or audit_events is None
             or alert_page is None
             or alert_stats is None
         ):
@@ -447,10 +471,10 @@ async def main() -> int:
                 f"[6/7] alert {alert['alert_id']} lifecycle "
                 f"ack -> resolve -> reopen -> resolve verified"
             )
-            if acknowledged.get("acknowledged_by") != "e2e-operator":
+            if acknowledged.get("acknowledged_by") != expected_actor:
                 print("FAIL: acknowledgement actor was not persisted")
                 ok = False
-            if retried.get("acknowledged_by") != "e2e-operator":
+            if retried.get("acknowledged_by") != expected_actor:
                 print("FAIL: retried acknowledgement overwrote the audit trail")
                 ok = False
             if resolved.get("status") != "resolved":
@@ -486,6 +510,12 @@ async def main() -> int:
                 if action not in actions:
                     print(f"FAIL: audit trail is missing {action}")
                     ok = False
+            if not audit_events:
+                print("FAIL: security audit is missing the acknowledge call")
+                ok = False
+            elif audit_events[0].get("actor_name") != audit_actor:
+                print("FAIL: security audit actor does not match the caller")
+                ok = False
             expected_events = [
                 "alert.triggered",
                 "alert.acknowledged",
@@ -530,7 +560,8 @@ async def main() -> int:
 
     print(
         "PASS: official radio bytes -> MQTT -> DB -> HTTP -> alert "
-        "lifecycle -> pagination/stats -> signed webhook verified"
+        "lifecycle -> RBAC/audit -> pagination/stats -> signed webhook "
+        "verified"
         if ok
         else "FAILED"
     )
