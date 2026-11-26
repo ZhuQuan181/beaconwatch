@@ -97,8 +97,8 @@ class Deduper(Generic[K, V]):
         The *latest* value for the key is always retained, so callers
         may use this dedup as a "most recent" cache.
         """
-        now = time.monotonic()
         with self._lock:
+            now = time.monotonic()
             self._inserts_since_sweep += 1
             if self._inserts_since_sweep >= self._sweep_every:
                 self._evict_expired_locked(now)
@@ -110,12 +110,11 @@ class Deduper(Generic[K, V]):
                 if now - first_seen < self._window_s:
                     # Duplicate within window: update value, mark duplicate.
                     self._entries[key] = (first_seen, value)
-                    # Move to end so recently-touched keys survive eviction.
-                    self._entries.move_to_end(key)
                     return True
 
             # New (or window-expired): insert.
             self._entries[key] = (now, value)
+            self._entries.move_to_end(key)
             self._enforce_cap_locked()
             return False
 
@@ -148,7 +147,7 @@ class Deduper(Generic[K, V]):
         cutoff = now - self._window_s
         for k in list(self._entries.keys()):
             first_seen, _ = self._entries[k]
-            if first_seen < cutoff:
+            if first_seen <= cutoff:
                 self._entries.pop(k, None)
             else:
                 break
