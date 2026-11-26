@@ -52,7 +52,7 @@ class MqttSubscriber:
         # an alert always points at a row that exists.
         self.alerts: AlertEngine | None = None
         self._zones: list[Zone] = []
-        self._zones_loaded_at: float = 0.0
+        self._zones_loaded_at: float | None = None
         # Operational counters
         self.received = 0
         self.persisted = 0
@@ -154,10 +154,10 @@ class MqttSubscriber:
         try:
             data = json.loads(payload)
             # Normalize protocol casing
-            if "protocol" in data and isinstance(data["protocol"], str):
+            if isinstance(data, dict) and isinstance(data.get("protocol"), str):
                 data["protocol"] = data["protocol"].lower()
             obs = DroneObservation.model_validate(data)
-        except (json.JSONDecodeError, ValidationError) as e:
+        except (json.JSONDecodeError, UnicodeDecodeError, ValidationError) as e:
             self.invalid += 1
             log.warning(
                 "mqtt.invalid",
@@ -167,8 +167,8 @@ class MqttSubscriber:
             return
 
         # Trust the topic station_id over the payload's, since the edge
-        # can lie about its own ID.  (Topic is set by the broker, not
-        # the client — except see note in security audit.)
+        # can lie about its own ID.  (Publishers choose topics; broker ACLs must bind each
+        # authenticated publisher to its own station namespace.)
         if station_id and station_id != obs.station_id:
             obs = obs.model_copy(update={"station_id": station_id})
 
@@ -231,7 +231,7 @@ class MqttSubscriber:
         try:
             data = json.loads(payload)
             info = StationInfo.model_validate(data)
-        except (json.JSONDecodeError, ValidationError) as exc:
+        except (json.JSONDecodeError, UnicodeDecodeError, ValidationError) as exc:
             self.invalid += 1
             log.warning("mqtt.invalid_info", topic=topic, error=str(exc)[:200])
             return
@@ -265,7 +265,7 @@ class MqttSubscriber:
         import time as _time
 
         now = _time.monotonic()
-        if self._zones and now - self._zones_loaded_at < 30.0:
+        if self._zones_loaded_at is not None and now - self._zones_loaded_at < 30.0:
             return self._zones
         factory = get_session_factory()
         async with factory() as session:
