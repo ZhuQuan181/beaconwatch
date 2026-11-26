@@ -1,6 +1,8 @@
 """HTTP route tests via httpx.AsyncClient with ASGITransport."""
 from __future__ import annotations
 
+import csv
+import io
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -363,6 +365,66 @@ async def test_rssi_appears_in_api_response(db_engine):
         r = await c.get("/observations", params={"limit": 1})
     assert r.status_code == 200
     assert r.json()[0]["rssi_dbm"] == -62
+
+
+async def test_export_csv_respects_unidentified_filter(db_engine):
+    await _seed_three_observations(db_engine)
+    app = create_app()
+    app.state.bus = ObservationBus()
+    app.state.subscriber = MqttSubscriber(_settings())
+
+    async with _client(app) as c:
+        r = await c.get(
+            "/observations/export",
+            params={"unidentified_only": "true"},
+        )
+
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/csv")
+    assert r.headers["x-export-rows"] == "1"
+    assert r.headers["x-export-truncated"] == "false"
+    rows = list(csv.DictReader(io.StringIO(r.text)))
+    assert [row["observation_id"] for row in rows] == ["obs-anon"]
+    assert rows[0]["operator_id"] == ""
+
+
+async def test_export_geojson_is_feature_collection(db_engine):
+    await _seed_three_observations(db_engine)
+    app = create_app()
+    app.state.bus = ObservationBus()
+    app.state.subscriber = MqttSubscriber(_settings())
+
+    async with _client(app) as c:
+        r = await c.get(
+            "/observations/export",
+            params={"format": "geojson"},
+        )
+
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("application/geo+json")
+    body = r.json()
+    assert body["type"] == "FeatureCollection"
+    assert len(body["features"]) == 3
+    first = body["features"][0]
+    assert first["geometry"]["type"] == "Point"
+    assert len(first["geometry"]["coordinates"]) == 3
+    assert first["properties"]["observation_id"] == "obs-anon"
+
+
+async def test_export_is_capped_by_server_policy(db_engine):
+    await _seed_three_observations(db_engine)
+    app = create_app()
+    app.state.bus = ObservationBus()
+    app.state.subscriber = MqttSubscriber(_settings())
+    app.state.settings = Settings()
+    app.state.settings.export_max_rows = 2
+
+    async with _client(app) as c:
+        r = await c.get("/observations/export", params={"limit": 100})
+
+    assert r.status_code == 200
+    assert r.headers["x-export-rows"] == "2"
+    assert r.headers["x-export-truncated"] == "true"
 
 
 # ── Operational hardening ─────────────────────────────────────────────

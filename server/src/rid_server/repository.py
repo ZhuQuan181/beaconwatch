@@ -242,11 +242,9 @@ async def write_observation(
 
 
 # ── Reads ─────────────────────────────────────────────────────────────
-async def list_observations(
-    session: AsyncSession,
+def _apply_observation_filters(
+    stmt,
     *,
-    limit: int = 100,
-    offset: int = 0,
     drone_id: str | None = None,
     station_id: str | None = None,
     bbox: tuple[float, float, float, float] | None = None,
@@ -254,22 +252,7 @@ async def list_observations(
     until: datetime | None = None,
     unidentified_only: bool = False,
     before: tuple[datetime, str] | None = None,
-) -> Sequence[Observation]:
-    """Filtered, time-ordered (newest first) observation listing.
-
-    Filters compose with AND.  ``bbox`` is ``(min_lon, min_lat, max_lon, max_lat)``.
-
-    ``since``/``until`` are an absolute window, which is what a
-    timeline scrubber needs.  ``since_seconds`` relative queries can't
-    express "show me 14:32:10 to 14:35:00 yesterday".
-
-    ``unidentified_only`` keeps only rows with no operator ID — the
-    "find the ghost drone" view.
-    """
-    stmt = select(Observation).order_by(
-        Observation.received_at.desc(),
-        Observation.observation_id.desc(),
-    )
+):
     if drone_id is not None:
         stmt = stmt.where(Observation.drone_id == drone_id)
     if station_id is not None:
@@ -299,9 +282,97 @@ async def list_observations(
                 ),
             )
         )
+    return stmt
+
+
+async def list_observations(
+    session: AsyncSession,
+    *,
+    limit: int = 100,
+    offset: int = 0,
+    drone_id: str | None = None,
+    station_id: str | None = None,
+    bbox: tuple[float, float, float, float] | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    unidentified_only: bool = False,
+    before: tuple[datetime, str] | None = None,
+) -> Sequence[Observation]:
+    """Filtered, time-ordered (newest first) observation listing.
+
+    Filters compose with AND.  ``bbox`` is ``(min_lon, min_lat, max_lon, max_lat)``.
+
+    ``since``/``until`` are an absolute window, which is what a
+    timeline scrubber needs.  ``since_seconds`` relative queries can't
+    express "show me 14:32:10 to 14:35:00 yesterday".
+
+    ``unidentified_only`` keeps only rows with no operator ID — the
+    "find the ghost drone" view.
+    """
+    stmt = _apply_observation_filters(
+        select(Observation),
+        drone_id=drone_id,
+        station_id=station_id,
+        bbox=bbox,
+        since=since,
+        until=until,
+        unidentified_only=unidentified_only,
+        before=before,
+    ).order_by(
+        Observation.received_at.desc(),
+        Observation.observation_id.desc(),
+    )
     stmt = stmt.limit(limit).offset(offset)
     result = await session.execute(stmt)
     return result.scalars().all()
+
+
+async def list_observations_for_export(
+    session: AsyncSession,
+    *,
+    limit: int,
+    drone_id: str | None = None,
+    station_id: str | None = None,
+    bbox: tuple[float, float, float, float] | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    unidentified_only: bool = False,
+) -> Sequence:
+    """Select only export columns, deliberately excluding the raw JSON blob.
+
+    A 50k-row export would otherwise materialize 50k full JSON payloads
+    that the CSV/GeoJSON writer never reads.
+    """
+
+    stmt = _apply_observation_filters(
+        select(
+            Observation.observation_id,
+            Observation.drone_id,
+            Observation.operator_id,
+            Observation.station_id,
+            Observation.protocol,
+            Observation.rssi_dbm,
+            Observation.position_lat,
+            Observation.position_lon,
+            Observation.position_alt_m,
+            Observation.speed_mps,
+            Observation.heading_deg,
+            Observation.drone_timestamp,
+            Observation.received_at,
+            Observation.self_id,
+        ),
+        drone_id=drone_id,
+        station_id=station_id,
+        bbox=bbox,
+        since=since,
+        until=until,
+        unidentified_only=unidentified_only,
+    ).order_by(
+        Observation.received_at.desc(),
+        Observation.observation_id.desc(),
+    )
+    result = await session.execute(stmt.limit(limit))
+    return result.all()
 
 
 async def list_unidentified_drones(

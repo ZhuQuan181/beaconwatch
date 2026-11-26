@@ -73,6 +73,12 @@ class Settings(BaseSettings):
         le=30 * 24 * 60 * 60,
         description="Default recent window for /drones/unidentified",
     )
+    export_max_rows: int = Field(
+        default=50000,
+        ge=100,
+        le=500000,
+        description="Hard cap for one observation export request.",
+    )
 
     # ── PostgreSQL / TimescaleDB ────────────────────────────────────
     db_host: str = "localhost"

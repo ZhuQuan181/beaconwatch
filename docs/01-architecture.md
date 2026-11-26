@@ -232,6 +232,11 @@ Redis 是可选的实时共享总线：单副本默认使用进程内 fan-out；
 
 ### HTTP / WebSocket
 
+`GET /observations/export` downloads the same filtered observation set as
+CSV or GeoJSON. The export deliberately omits the raw JSON blob, caps rows
+with `RID_EXPORT_MAX_ROWS`, and neutralizes spreadsheet formulas in CSV
+text fields.
+
 - `GET /stations`
 - `GET /drones`
 - `GET /drones/unidentified`

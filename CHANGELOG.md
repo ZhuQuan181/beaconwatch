@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.3.0 - 2026-11-27
+
+### Added
+
+- `GET /observations/export` with `format=csv|geojson`, the same
+  drone/station/bbox/time/unidentified filters as the live API, and
+  `X-Export-Rows` / `X-Export-Truncated` response headers.
+- `RID_EXPORT_MAX_ROWS` server-side export cap (default 50,000).
+- CSV formula-injection neutralization for operator-controlled text.
+- CSV, GeoJSON feature and truncation regression tests.
+
+### Changed
+
+- Export queries select only flat export columns; the large raw JSON
+  observation blob is never materialized for downloads.
+- CORS exposes export metadata headers to browser clients.
+
 ## 1.2.0 - 2026-11-27
 
 ### Added

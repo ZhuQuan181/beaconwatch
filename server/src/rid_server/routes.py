@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import csv
+import io
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Literal
@@ -68,6 +70,7 @@ from .repository import (
     list_audit_events,
     list_drones,
     list_observations,
+    list_observations_for_export,
     list_stations,
     list_unidentified_drones,
     reopen_alert,
@@ -850,6 +853,176 @@ async def get_observations(
     if next_cursor is not None:
         response.headers["X-Next-Cursor"] = next_cursor
     return [_row_to_observation(r) for r in rows]
+
+
+def _csv_safe(value: object) -> object:
+    """Neutralize spreadsheet formulas in operator-controlled text."""
+
+    if isinstance(value, str) and value.startswith(("=", "+", "-", "@")):
+        return f"'{value}"
+    return value
+
+
+@router.get("/observations/export")
+async def export_observations(
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    format: Annotated[
+        Literal["csv", "geojson"],
+        Query(description="Download format"),
+    ] = "csv",
+    limit: Annotated[
+        int,
+        Query(
+            ge=1,
+            le=500000,
+            description="Requested rows; capped by the server export policy",
+        ),
+    ] = 50000,
+    drone_id: Annotated[str | None, Query()] = None,
+    station_id: Annotated[str | None, Query()] = None,
+    bbox: Annotated[
+        str | None,
+        Query(
+            description="min_lon,min_lat,max_lon,max_lat",
+            pattern=r"^-?\d+(\.\d+)?,-?\d+(\.\d+)?,-?\d+(\.\d+)?,-?\d+(\.\d+)?$",
+        ),
+    ] = None,
+    since_seconds: Annotated[int | None, Query(ge=0, le=86400 * 30)] = None,
+    from_: Annotated[
+        datetime | None,
+        Query(alias="from", description="Absolute window start (ISO 8601)"),
+    ] = None,
+    to: Annotated[datetime | None, Query(description="Absolute window end (ISO 8601)")] = None,
+    unidentified_only: Annotated[
+        bool,
+        Query(description="Only drones that broadcast no operator ID"),
+    ] = False,
+) -> Response:
+    """Download filtered observations for investigation or analysis.
+
+    The raw JSON payload is intentionally not selected.  Operators get
+    stable, flat fields for CSV and RFC 7946 GeoJSON features for GIS.
+    """
+
+    settings = getattr(request.app.state, "settings", None) or get_settings()
+    effective_limit = min(limit, settings.export_max_rows)
+    parsed_bbox, since, until = _parse_window(
+        bbox, since_seconds, from_, to
+    )
+    rows = await list_observations_for_export(
+        session,
+        limit=effective_limit + 1,
+        drone_id=drone_id,
+        station_id=station_id,
+        bbox=parsed_bbox,
+        since=since,
+        until=until,
+        unidentified_only=unidentified_only,
+    )
+    truncated = len(rows) > effective_limit
+    rows = rows[:effective_limit]
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    headers = {
+        "Content-Disposition": (
+            f'attachment; filename="beaconwatch-observations-{stamp}.'
+            f'{"csv" if format == "csv" else "geojson"}"'
+        ),
+        "X-Export-Rows": str(len(rows)),
+        "X-Export-Truncated": "true" if truncated else "false",
+    }
+
+    if format == "csv":
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(
+            [
+                "observation_id",
+                "drone_id",
+                "operator_id",
+                "station_id",
+                "protocol",
+                "rssi_dbm",
+                "lat",
+                "lon",
+                "alt_m",
+                "speed_mps",
+                "heading_deg",
+                "drone_timestamp",
+                "received_at",
+                "self_id",
+            ]
+        )
+        for row in rows:
+            writer.writerow(
+                [
+                    _csv_safe(row.observation_id),
+                    _csv_safe(row.drone_id),
+                    _csv_safe(row.operator_id),
+                    _csv_safe(row.station_id),
+                    _csv_safe(row.protocol),
+                    row.rssi_dbm,
+                    row.position_lat,
+                    row.position_lon,
+                    row.position_alt_m,
+                    row.speed_mps,
+                    row.heading_deg,
+                    row.drone_timestamp.isoformat()
+                    if row.drone_timestamp
+                    else "",
+                    row.received_at.isoformat(),
+                    _csv_safe(row.self_id),
+                ]
+            )
+        return Response(
+            content=buffer.getvalue(),
+            media_type="text/csv; charset=utf-8",
+            headers=headers,
+        )
+
+    features = [
+        {
+            "type": "Feature",
+            "geometry": {
+                "type": "Point",
+                "coordinates": [
+                    row.position_lon,
+                    row.position_lat,
+                    row.position_alt_m,
+                ],
+            },
+            "properties": {
+                "observation_id": row.observation_id,
+                "drone_id": row.drone_id,
+                "operator_id": row.operator_id,
+                "station_id": row.station_id,
+                "protocol": row.protocol,
+                "rssi_dbm": row.rssi_dbm,
+                "alt_m": row.position_alt_m,
+                "speed_mps": row.speed_mps,
+                "heading_deg": row.heading_deg,
+                "drone_timestamp": (
+                    row.drone_timestamp.isoformat()
+                    if row.drone_timestamp
+                    else None
+                ),
+                "received_at": row.received_at.isoformat(),
+                "self_id": row.self_id,
+            },
+        }
+        for row in rows
+    ]
+    body = json.dumps(
+        {"type": "FeatureCollection", "features": features},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return Response(
+        content=body,
+        media_type="application/geo+json",
+        headers=headers,
+    )
 
 
 @router.get("/observations/page", response_model=ObservationPage)

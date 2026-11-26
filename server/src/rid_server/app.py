@@ -143,7 +143,12 @@ def create_app() -> FastAPI:
             allow_origins=settings.cors_origin_list,
             allow_methods=["GET", "POST", "PUT", "OPTIONS"],
             allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
-            expose_headers=["X-Request-ID", "X-Next-Cursor"],
+            expose_headers=[
+                "X-Request-ID",
+                "X-Next-Cursor",
+                "X-Export-Rows",
+                "X-Export-Truncated",
+            ],
             max_age=600,
         )
     app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
