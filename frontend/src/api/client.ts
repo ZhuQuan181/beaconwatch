@@ -16,6 +16,7 @@ import type {
   DroneSummary,
   GeofenceZone,
   ObservationPage,
+  OperationalOverview,
   Station,
 } from "../types";
 
@@ -347,6 +348,20 @@ export const api = {
 
   listUnidentified: (signal?: AbortSignal) =>
     jsonGet<string[]>("/drones/unidentified", { signal }),
+
+  getOverview: (
+    params: { windowSeconds?: number } = {},
+    signal?: AbortSignal,
+  ) => {
+    const q = new URLSearchParams();
+    if (params.windowSeconds !== undefined) {
+      q.set("window_seconds", String(params.windowSeconds));
+    }
+    const qs = q.toString();
+    return jsonGet<OperationalOverview>(`/stats/overview${qs ? `?${qs}` : ""}`, {
+      signal,
+    });
+  },
 
   exportObservations: (
     params: ObservationExportParams = {},

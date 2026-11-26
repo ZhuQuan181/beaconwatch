@@ -149,6 +149,21 @@ export interface AuditEvent {
   detail: Record<string, unknown>;
 }
 
+export interface OperationalOverview {
+  generated_at: string;
+  window_seconds: number;
+  stations_total: number;
+  stations_online: number;
+  stations_stale: number;
+  stations_offline: number;
+  active_drones: number;
+  observations_window: number;
+  observations_24h: number;
+  alerts_active: number;
+  alerts_open: number;
+  alerts_acknowledged: number;
+}
+
 /** Frame sent by the server over /ws/observations. */
 export type WsFrame =
   | { type: "obs"; data: DroneObservation }

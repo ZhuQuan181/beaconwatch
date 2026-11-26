@@ -262,6 +262,23 @@ class AuthPrincipalOut(BaseModel):
     key_id: str | None = None
 
 
+class OperationalOverviewOut(BaseModel):
+    """Small, cache-friendly operational summary for the dashboard."""
+
+    generated_at: str
+    window_seconds: int
+    stations_total: int = 0
+    stations_online: int = 0
+    stations_stale: int = 0
+    stations_offline: int = 0
+    active_drones: int = 0
+    observations_window: int = 0
+    observations_24h: int = 0
+    alerts_active: int = 0
+    alerts_open: int = 0
+    alerts_acknowledged: int = 0
+
+
 class AuditEventOut(BaseModel):
     """One append-only API mutation audit row."""
 

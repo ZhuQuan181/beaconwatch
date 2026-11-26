@@ -1030,6 +1030,77 @@ async def get_alert_stats(
     }
 
 
+async def get_operational_overview(
+    session: AsyncSession,
+    *,
+    window_seconds: int,
+    stale_after_s: int,
+    offline_after_s: int,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    """Aggregate one dashboard "is the system healthy?" snapshot.
+
+    Station freshness is derived from ``last_seen`` rather than trusting
+    the persisted ``online`` flag alone; an edge node that lost power
+    cannot update its own flag.
+    """
+
+    snapshot_at = _as_utc(now or datetime.now(timezone.utc))
+    window_since = snapshot_at - timedelta(seconds=window_seconds)
+    day_since = snapshot_at - timedelta(seconds=24 * 60 * 60)
+
+    station_rows = (
+        await session.execute(
+            select(Station.station_id, Station.online, Station.last_seen)
+        )
+    ).all()
+    stations_online = 0
+    stations_stale = 0
+    stations_offline = 0
+    for _station_id, online, last_seen in station_rows:
+        if last_seen is None:
+            stations_offline += 1
+            continue
+        age = (snapshot_at - _as_utc(last_seen)).total_seconds()
+        if online and age <= stale_after_s:
+            stations_online += 1
+        elif age <= offline_after_s:
+            stations_stale += 1
+        else:
+            stations_offline += 1
+
+    window_row = (
+        await session.execute(
+            select(
+                func.count(Observation.observation_id),
+                func.count(func.distinct(Observation.drone_id)),
+            ).where(Observation.received_at >= window_since)
+        )
+    ).one()
+    day_count = (
+        await session.execute(
+            select(func.count(Observation.observation_id)).where(
+                Observation.received_at >= day_since
+            )
+        )
+    ).scalar_one()
+    alerts = await get_alert_stats(session)
+    return {
+        "generated_at": snapshot_at.isoformat(),
+        "window_seconds": window_seconds,
+        "stations_total": len(station_rows),
+        "stations_online": stations_online,
+        "stations_stale": stations_stale,
+        "stations_offline": stations_offline,
+        "active_drones": int(window_row[1] or 0),
+        "observations_window": int(window_row[0] or 0),
+        "observations_24h": int(day_count or 0),
+        "alerts_active": int(alerts["active"]),
+        "alerts_open": int(alerts["open"]),
+        "alerts_acknowledged": int(alerts["acknowledged"]),
+    }
+
+
 async def purge_expired_resolved_alerts(
     session: AsyncSession,
     *,

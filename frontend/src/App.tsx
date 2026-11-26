@@ -56,7 +56,7 @@ export function App() {
   // we've heard from it since the page loaded.  This avoids the
   // bug where a station that recently went offline still showed
   // green just because the registry hadn't polled yet.
-  const { stations: registeredStations } = usePresence();
+  const { stations: registeredStations, overview } = usePresence();
 
   // ── Timeline state ────────────────────────────────────────────────
   // `cursorTs === null` means LIVE.  Anything else is a replay frame:
@@ -298,7 +298,10 @@ export function App() {
         )}
         <span className="spacer" />
         <span className="stat">
-          {stations.length} station · {droneCount} drone
+          {overview
+            ? `${overview.stations_online}/${overview.stations_total} online`
+            : `${stations.length} station`}{" "}
+          · {droneCount} drone · {overview?.observations_window ?? 0}/h obs
           {filtered.length !== displayed.length ? ` · ${filtered.length}/${displayed.length}` : ""}
         </span>
         <span
@@ -318,7 +321,14 @@ export function App() {
 
       <aside className="sidebar">
         <div className="section">
-          <h2>Stations</h2>
+          <h2>
+            Stations
+            {overview && (
+              <span className="section-count">
+                {overview.stations_online} online · {overview.stations_stale} stale
+              </span>
+            )}
+          </h2>
           {stations.length === 0 ? (
             <p className="dim">No stations registered.</p>
           ) : (

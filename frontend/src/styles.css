@@ -73,6 +73,15 @@ aside.sidebar h2 {
   color: #6f7a8c;
   margin: 0 0 8px;
 }
+.section-count {
+  float: right;
+  color: #58627a;
+  font-size: 9.5px;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  font-variant-numeric: tabular-nums;
+}
 
 .map-container {
   position: relative;

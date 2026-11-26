@@ -237,6 +237,11 @@ CSV or GeoJSON. The export deliberately omits the raw JSON blob, caps rows
 with `RID_EXPORT_MAX_ROWS`, and neutralizes spreadsheet formulas in CSV
 text fields.
 
+`GET /stats/overview` returns station freshness (online/stale/offline),
+active drones, observation counts for a selectable window and 24 hours,
+and alert lifecycle counts. Station freshness uses `last_seen` so a
+receiver that lost power is not reported green by a stale `online` flag.
+
 - `GET /stations`
 - `GET /drones`
 - `GET /drones/unidentified`

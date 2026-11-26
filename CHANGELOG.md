@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.5.0 - 2026-11-27
+
+### Added
+
+- `GET /stats/overview` operational summary: station freshness
+  (online/stale/offline), active drones, observations in the selected
+  window and 24 hours, plus active/open/acknowledged alert counts.
+- Configurable station freshness thresholds
+  (`RID_STATION_STALE_AFTER_S`, `RID_STATION_OFFLINE_AFTER_S`) with
+  validation that offline must be the wider threshold.
+- Dashboard station health summary and a top-bar activity rate derived
+  from the overview endpoint.
+- Overview aggregation and threshold validation tests.
+
+### Changed
+
+- Station presence polling drops the unused drone-list request and
+  slows from 5 s to 10 s; the dashboard now fetches a summary it
+  actually renders.
+- Station freshness is derived from `last_seen`, not only the
+  heartbeat's persisted `online` flag.
+
 ## 1.4.0 - 2026-11-27
 
 ### Added

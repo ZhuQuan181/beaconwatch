@@ -46,7 +46,8 @@ run the real edge/MQTT/database/API stack.
   signed webhooks, with leases, bounded exponential backoff, dead-lettering
   and `delivery_id` idempotency for at-least-once delivery.
 - **Dashboard:** heartbeat-monitored live WebSocket feed, timeout/retry-aware
-  HTTP client, replay timeline, stations and coverage, geofences, alerts,
+  HTTP client, replay timeline, searchable protocol/ghost filters, CSV
+  export, operational overview, stations and coverage, geofences, alerts,
   unidentified-drone highlighting.
 - **Verified chain:** official radio bytes → receiver → pipeline → MQTT →
   subscriber → database → HTTP, covered by unit, contract and E2E tests.

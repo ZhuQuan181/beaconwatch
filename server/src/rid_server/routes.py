@@ -43,6 +43,7 @@ from .models import (
     DroneSummary,
     GeofenceZoneOut,
     ObservationPage,
+    OperationalOverviewOut,
     Position,
     Station,
 )
@@ -65,6 +66,7 @@ from .repository import (
     get_alert,
     get_alert_stats,
     get_drone,
+    get_operational_overview,
     list_alert_events,
     list_alerts,
     list_audit_events,
@@ -152,6 +154,27 @@ async def get_stations(
         )
         for r in rows
     ]
+
+
+@router.get("/stats/overview", response_model=OperationalOverviewOut)
+async def get_overview(
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    window_seconds: Annotated[
+        int,
+        Query(ge=60, le=86400, description="Activity window"),
+    ] = 3600,
+) -> OperationalOverviewOut:
+    """Return the dashboard's operational health summary."""
+
+    settings = getattr(request.app.state, "settings", None) or get_settings()
+    snapshot = await get_operational_overview(
+        session,
+        window_seconds=window_seconds,
+        stale_after_s=settings.station_stale_after_s,
+        offline_after_s=settings.station_offline_after_s,
+    )
+    return OperationalOverviewOut(**snapshot)
 
 
 # ── Geofence zones ────────────────────────────────────────────────────
@@ -1217,6 +1240,7 @@ _KNOWN_PREFIXES: tuple[str, ...] = (
     "/stations",
     "/drones",
     "/observations",
+    "/stats",
     "/alerts",
     "/healthz",
     "/metrics",

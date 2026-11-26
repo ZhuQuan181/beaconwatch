@@ -79,6 +79,10 @@ class Settings(BaseSettings):
         le=500000,
         description="Hard cap for one observation export request.",
     )
+    # A station is "stale" when its last heartbeat/observation is older
+    # than this.  It becomes offline after the second threshold.
+    station_stale_after_s: int = Field(default=120, ge=10, le=3600)
+    station_offline_after_s: int = Field(default=900, ge=60, le=86400)
 
     # ── PostgreSQL / TimescaleDB ────────────────────────────────────
     db_host: str = "localhost"
@@ -347,6 +351,11 @@ class Settings(BaseSettings):
             raise ValueError(
                 "RID_DB_POOL_MAX must be greater than or equal to "
                 "RID_DB_POOL_MIN"
+            )
+        if self.station_offline_after_s < self.station_stale_after_s:
+            raise ValueError(
+                "RID_STATION_OFFLINE_AFTER_S must be greater than or equal "
+                "to RID_STATION_STALE_AFTER_S"
             )
         return self
 

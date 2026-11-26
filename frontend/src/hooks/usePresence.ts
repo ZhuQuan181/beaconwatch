@@ -1,21 +1,23 @@
 import { useEffect, useState } from "react";
-import type { DroneSummary, Station } from "../types";
+import type { OperationalOverview, Station } from "../types";
 import { api } from "../api/client";
 
 export interface PresenceState {
   stations: Station[];
-  drones: DroneSummary[];
+  overview: OperationalOverview | null;
   error: string | null;
   /** Triggered when the underlying fleet changes (used for re-fetch). */
   tick: number;
 }
 
-const POLL_MS = 5_000;
+// Presence changes on the order of heartbeats, not frames.  Polling
+// every 5 s used to also fetch a drone list the dashboard never read.
+const POLL_MS = 10_000;
 
 export function usePresence() {
   const [state, setState] = useState<PresenceState>({
     stations: [],
-    drones: [],
+    overview: null,
     error: null,
     tick: 0,
   });
@@ -39,17 +41,15 @@ export function usePresence() {
       const current = new AbortController();
       controller = current;
       try {
-        // The sidebar/header are driven by the WS stream; the registry
-        // adds detail fields such as station assignment and operator IDs.
-        const [stations, drones] = await Promise.all([
+        const [stations, overview] = await Promise.all([
           api.listStations(current.signal),
-          api.listDrones({ onlineWithinS: 3600 }, current.signal),
+          api.getOverview({}, current.signal),
         ]);
         if (!alive || current.signal.aborted) return;
         setState((s) => ({
           ...s,
           stations,
-          drones,
+          overview,
           error: null,
           tick: s.tick + 1,
         }));

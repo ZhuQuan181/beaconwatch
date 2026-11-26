@@ -106,6 +106,25 @@ async def test_get_stations_returns_seeded(db_engine):
     assert data[0]["name"] == "Pier"
 
 
+async def test_overview_endpoint_returns_health_summary(db_engine):
+    await _seed_three_observations(
+        db_engine,
+        anchor=datetime.now(timezone.utc),
+    )
+    app = create_app()
+    app.state.bus = ObservationBus()
+    app.state.subscriber = MqttSubscriber(_settings())
+
+    async with _client(app) as c:
+        r = await c.get("/stats/overview")
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["stations_total"] == 1
+    assert body["observations_24h"] == 3
+    assert body["window_seconds"] == 3600
+
+
 # ── Observations POST/GET roundtrip via the MQTT path ────────────────
 async def test_observation_round_trip(db_engine):
     from rid_server.models import Station as SM
