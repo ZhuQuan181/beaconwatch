@@ -1,6 +1,7 @@
 """HTTP route tests via httpx.AsyncClient with ASGITransport."""
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -233,7 +234,11 @@ async def test_get_drone_by_id_404_when_missing(db_engine):
 
 
 # ── Timeline window + unidentified filter ─────────────────────────────
-async def _seed_three_observations(db_engine):
+async def _seed_three_observations(
+    db_engine,
+    *,
+    anchor: datetime | None = None,
+):
     """Three obs: two identified at different times, one never identifies."""
     from rid_server.models import DroneObservation, Position
     from rid_server.models import Station as SM
@@ -244,11 +249,34 @@ async def _seed_three_observations(db_engine):
                   alt_m=0, firmware_version="", last_seen=None, online=True)
         )
 
-    rows = [
-        ("obs-early", "drone-good", "OP-1", "2026-11-14T10:00:00+00:00"),
-        ("obs-mid", "drone-good", "OP-1", "2026-11-14T11:00:00+00:00"),
-        ("obs-anon", "drone-ghost", None, "2026-11-14T11:30:00+00:00"),
-    ]
+    if anchor is None:
+        rows = [
+            ("obs-early", "drone-good", "OP-1", "2026-11-14T10:00:00+00:00"),
+            ("obs-mid", "drone-good", "OP-1", "2026-11-14T11:00:00+00:00"),
+            ("obs-anon", "drone-ghost", None, "2026-11-14T11:30:00+00:00"),
+        ]
+    else:
+        # Keep default-window tests independent of the calendar date.
+        rows = [
+            (
+                "obs-early",
+                "drone-good",
+                "OP-1",
+                (anchor - timedelta(minutes=90)).isoformat(),
+            ),
+            (
+                "obs-mid",
+                "drone-good",
+                "OP-1",
+                (anchor - timedelta(minutes=30)).isoformat(),
+            ),
+            (
+                "obs-anon",
+                "drone-ghost",
+                None,
+                (anchor - timedelta(minutes=5)).isoformat(),
+            ),
+        ]
     for oid, drone, op, ts in rows:
         raw = _obs_dict(drone_id=drone, station_id="st-1")
         raw["observation_id"] = oid
@@ -310,7 +338,10 @@ async def test_observations_unidentified_only(db_engine):
 
 
 async def test_unidentified_drones_endpoint(db_engine):
-    await _seed_three_observations(db_engine)
+    await _seed_three_observations(
+        db_engine,
+        anchor=datetime.now(timezone.utc),
+    )
     app = create_app()
     app.state.bus = ObservationBus()
     app.state.subscriber = MqttSubscriber(_settings())

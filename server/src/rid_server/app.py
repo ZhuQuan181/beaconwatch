@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from sqlalchemy import text
 
+from . import __version__
 from .alerts import AlertEngine, AlertRing
 from .auth import AuthStore
 from .bus import create_bus
@@ -127,7 +128,7 @@ def create_app() -> FastAPI:
     request_metrics = RequestMetrics()
     app = FastAPI(
         title="RID Server",
-        version="1.0.0",
+        version=__version__,
         lifespan=lifespan,
     )
     app.state.settings = settings

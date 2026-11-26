@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.1.0 - 2026-11-27
+
+### Added
+
+- MQTT regression tests for non-object JSON payloads, invalid UTF-8 and
+  empty geofence caches.
+- FIFO dedup expiration tests that pin insertion order and refresh
+  behavior.
+
+### Changed
+
+- Server package version is now the single source of truth for the
+  OpenAPI version and `rid_build_info`.
+- All edge, server and frontend package metadata advanced to 1.1.0.
+
+### Fixed
+
+- Malformed MQTT observation/info payloads are isolated and counted as
+  invalid instead of raising and stalling the subscriber.
+- Geofence reads no longer skip the database when the cached zone list
+  is legitimately empty.
+- Dedup FIFO expiration now preserves insertion order, so an expired
+  key cannot evict a live newer one.
+- Lifespan startup uses an async exit stack, guaranteeing cleanup when
+  a later component fails to start and when shutdown raises.
+- The unidentified-drone route test uses a relative time anchor instead
+  of aging out of the default seven-day lookback.
+
 ## 1.0.0 - 2026-11-16
 
 ### Added
