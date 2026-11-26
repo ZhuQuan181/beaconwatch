@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.2.0 - 2026-11-27
+
+### Added
+
+- Migrations `0010_perf_indexes`: a partial index for
+  `/drones/unidentified` and a protocol/time index for analytics.
+- Configurable database pool timeout, recycling, LIFO reuse and a
+  PostgreSQL statement timeout (`RID_DB_POOL_*`,
+  `RID_DB_STATEMENT_TIMEOUT_MS`).
+- Unit tests proving the min/max pool knobs map to the intended
+  persistent/overflow connection counts.
+
+### Changed
+
+- `/drones/unidentified` now returns a deterministic drone-id order.
+- Default connection pool is 2 persistent plus 8 overflow connections,
+  matching the documented `RID_DB_POOL_MIN=2`, `RID_DB_POOL_MAX=10`
+  contract.
+
+### Fixed
+
+- The engine previously passed `RID_DB_POOL_MAX` as `pool_size` and
+  `RID_DB_POOL_MIN` as overflow, allowing more connections than the
+  configured maximum.
+
 ## 1.1.0 - 2026-11-27
 
 ### Added

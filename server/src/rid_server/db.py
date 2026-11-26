@@ -26,6 +26,7 @@ from sqlalchemy import (
     String,
     Text,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import (
@@ -457,6 +458,17 @@ class Observation(Base):
             "operator_id",
             "received_at",
         ),
+        Index(
+            "ix_observations_protocol_received",
+            "protocol",
+            "received_at",
+        ),
+        Index(
+            "ix_observations_unidentified_drone_received",
+            "drone_id",
+            "received_at",
+            postgresql_where=text("operator_id IS NULL"),
+        ),
     )
 
 
@@ -465,15 +477,51 @@ _engine = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 
 
+def _pool_options(settings) -> dict:
+    """Translate the operator-facing min/max pool knobs to SQLAlchemy.
+
+    ``pool_size`` is the number of persistent connections; overflow is
+    only the extra capacity above it.  The previous implementation passed
+    the maximum as ``pool_size``, silently allowing more connections than
+    ``RID_DB_POOL_MAX`` advertised.
+    """
+
+    pool_size = max(1, int(settings.db_pool_min))
+    return {
+        "pool_size": pool_size,
+        "max_overflow": max(0, int(settings.db_pool_max) - pool_size),
+        "pool_timeout": float(settings.db_pool_timeout_s),
+        "pool_recycle": int(settings.db_pool_recycle_s),
+        "pool_use_lifo": bool(settings.db_pool_use_lifo),
+        "pool_pre_ping": True,
+    }
+
+
+def _connect_args(settings) -> dict:
+    """Return backend-specific connection settings."""
+
+    if (
+        settings.database_url.startswith("postgresql+asyncpg")
+        and settings.db_statement_timeout_ms > 0
+    ):
+        return {
+            "server_settings": {
+                "statement_timeout": str(
+                    int(settings.db_statement_timeout_ms)
+                )
+            }
+        }
+    return {}
+
+
 def get_engine():
     global _engine
     if _engine is None:
         settings = get_settings()
         _engine = create_async_engine(
             settings.database_url,
-            pool_size=settings.db_pool_max,
-            max_overflow=settings.db_pool_min,
-            pool_pre_ping=True,
+            **_pool_options(settings),
+            connect_args=_connect_args(settings),
             echo=False,
         )
     return _engine

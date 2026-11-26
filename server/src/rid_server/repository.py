@@ -320,6 +320,7 @@ async def list_unidentified_drones(
         select(Observation.drone_id)
         .where(Observation.operator_id.is_(None))
         .distinct()
+        .order_by(Observation.drone_id)
     )
     if since is not None:
         stmt = stmt.where(Observation.received_at >= since)

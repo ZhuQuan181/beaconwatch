@@ -309,6 +309,12 @@ WebSocket 推送以下 frame：
 
 ## 8. 数据库
 
+连接池使用 `RID_DB_POOL_MIN` 个常驻连接和
+`RID_DB_POOL_MAX - RID_DB_POOL_MIN` 个溢出连接；等待上限由
+`RID_DB_POOL_TIMEOUT_S` 控制。PostgreSQL 查询默认带
+`RID_DB_STATEMENT_TIMEOUT_MS=30000` 语句超时，避免慢查询长期占用连接。
+`/drones/unidentified` 使用只覆盖 `operator_id IS NULL` 行的部分索引。
+
 - TimescaleDB extension 与 `observations` hypertable；
 - 经纬度使用普通 Float 列和组合索引，不依赖 PostGIS；
 - 最近站点、station/operator 时间窗和 `(received_at, observation_id)` 游标

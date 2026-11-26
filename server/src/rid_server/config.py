@@ -81,8 +81,27 @@ class Settings(BaseSettings):
     db_user: str = "rid"
     db_password: str = Field(default="rid_dev_password", repr=False)
     db_password_file: str = ""
-    db_pool_min: int = 2
-    db_pool_max: int = 10
+    db_pool_min: int = Field(
+        default=2,
+        ge=0,
+        le=200,
+        description="Connections kept open in the pool.",
+    )
+    db_pool_max: int = Field(
+        default=10,
+        ge=1,
+        le=500,
+        description="Maximum pool connections including overflow.",
+    )
+    db_pool_timeout_s: float = Field(default=30.0, ge=1.0, le=300.0)
+    db_pool_recycle_s: int = Field(default=1800, ge=0, le=86400)
+    db_pool_use_lifo: bool = True
+    # 0 disables the PostgreSQL statement timeout.
+    db_statement_timeout_ms: int = Field(
+        default=30000,
+        ge=0,
+        le=600000,
+    )
 
     # ── MQTT broker ─────────────────────────────────────────────────
     mqtt_host: str = "localhost"
@@ -314,6 +333,15 @@ class Settings(BaseSettings):
                 )
             if not self.redis_channel.strip():
                 raise ValueError("RID_REDIS_CHANNEL must not be empty")
+        return self
+
+    @model_validator(mode="after")
+    def validate_db_pool_config(self) -> Settings:
+        if self.db_pool_max < self.db_pool_min:
+            raise ValueError(
+                "RID_DB_POOL_MAX must be greater than or equal to "
+                "RID_DB_POOL_MIN"
+            )
         return self
 
 
