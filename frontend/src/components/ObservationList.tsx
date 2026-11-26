@@ -4,6 +4,7 @@ interface Props {
   observations: DroneObservation[];
   selectedDroneId?: string | null;
   onSelect?: (droneId: string) => void;
+  emptyMessage?: string;
 }
 
 function fmtTime(iso: string): string {
@@ -14,11 +15,16 @@ function fmtTime(iso: string): string {
   }
 }
 
-export function ObservationList({ observations, selectedDroneId, onSelect }: Props) {
+export function ObservationList({
+  observations,
+  selectedDroneId,
+  onSelect,
+  emptyMessage,
+}: Props) {
   if (observations.length === 0) {
     return (
       <div className="obs-list empty">
-        <p>No observations yet. Waiting for a drone to come online…</p>
+        <p>{emptyMessage ?? "No observations yet. Waiting for a drone to come online…"}</p>
       </div>
     );
   }

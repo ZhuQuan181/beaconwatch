@@ -38,6 +38,21 @@ export interface AlertQuery {
   cursor?: string;
 }
 
+export interface ObservationExportParams {
+  format?: "csv" | "geojson";
+  limit?: number;
+  droneId?: string;
+  stationId?: string;
+  from?: string;
+  to?: string;
+  unidentifiedOnly?: boolean;
+}
+
+export interface DownloadResult {
+  blob: Blob;
+  filename: string;
+}
+
 class ApiError extends Error {
   constructor(
     message: string,
@@ -190,6 +205,62 @@ async function jsonPost<T>(
   return jsonRequest<T>(path, { ...options, method: "POST", body });
 }
 
+async function downloadRequest(
+  path: string,
+  options: {
+    signal?: AbortSignal;
+    timeoutMs?: number;
+  } = {},
+): Promise<DownloadResult> {
+  const timeoutMs = options.timeoutMs ?? 30_000;
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  const onOuterAbort = () => controller.abort();
+  if (options.signal?.aborted) {
+    controller.abort();
+  } else {
+    options.signal?.addEventListener("abort", onOuterAbort, { once: true });
+  }
+
+  try {
+    const headers: Record<string, string> = {};
+    if (API_TOKEN) headers.Authorization = `Bearer ${API_TOKEN}`;
+    const res = await fetch(`${BASE}${path}`, {
+      headers,
+      signal: controller.signal,
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      throw new ApiError(
+        `GET ${path} failed: ${res.status} ${res.statusText}`,
+        res.status,
+        res.status === 429 || res.status >= 500,
+      );
+    }
+    const disposition = res.headers.get("content-disposition") ?? "";
+    const match = /filename="?([^";]+)"?/i.exec(disposition);
+    return {
+      blob: await res.blob(),
+      filename: match?.[1] ?? "beaconwatch-observations.csv",
+    };
+  } catch (error) {
+    if (timedOut) {
+      throw new ApiError(`GET ${path} timed out`, undefined, true);
+    }
+    if (options.signal?.aborted) {
+      throw new DOMException("Aborted", "AbortError");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    options.signal?.removeEventListener("abort", onOuterAbort);
+  }
+}
+
 function alertQueryString(params: AlertQuery): string {
   const q = new URLSearchParams();
   if (params.limit !== undefined) q.set("limit", String(params.limit));
@@ -276,6 +347,21 @@ export const api = {
 
   listUnidentified: (signal?: AbortSignal) =>
     jsonGet<string[]>("/drones/unidentified", { signal }),
+
+  exportObservations: (
+    params: ObservationExportParams = {},
+    signal?: AbortSignal,
+  ) => {
+    const q = new URLSearchParams();
+    q.set("format", params.format ?? "csv");
+    if (params.limit !== undefined) q.set("limit", String(params.limit));
+    if (params.droneId) q.set("drone_id", params.droneId);
+    if (params.stationId) q.set("station_id", params.stationId);
+    if (params.from) q.set("from", params.from);
+    if (params.to) q.set("to", params.to);
+    if (params.unidentifiedOnly) q.set("unidentified_only", "true");
+    return downloadRequest(`/observations/export?${q.toString()}`, { signal });
+  },
 
   listZones: (signal?: AbortSignal) =>
     jsonGet<GeofenceZone[]>("/zones", { signal }),

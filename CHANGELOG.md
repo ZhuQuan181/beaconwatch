@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.4.0 - 2026-11-27
+
+### Added
+
+- Dashboard observation filters: free-text search across drone,
+  operator, station and self-ID; protocol selection; and
+  unidentified-only mode.
+- A one-click CSV export of the currently displayed time window, using
+  the authenticated export endpoint.
+- Station rows now show how long a receiver has been offline.
+- Filtered/total observation counts and filter-specific empty states.
+
+### Changed
+
+- Station presence is derived from the unfiltered live feed, so hiding
+  a station's observations no longer makes the station appear offline.
+- Drone counts, map markers and the sidebar list all follow the active
+  observation filters.
+
 ## 1.3.0 - 2026-11-27
 
 ### Added

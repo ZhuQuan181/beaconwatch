@@ -12,12 +12,26 @@ import type {
   AuthPrincipal,
   DroneObservation,
   GeofenceZone,
+  Protocol,
 } from "./types";
 
 /** How far back the history buffer reaches, for the timeline window. */
 const HISTORY_LIMIT = 1000;
 /** History/unidentified refresh cadence.  Live rows still arrive via WS. */
 const HISTORY_REFRESH_MS = 4_000;
+
+function relativeAge(iso?: string | null): string {
+  if (!iso) return "";
+  const elapsed = Date.now() - Date.parse(iso);
+  if (!Number.isFinite(elapsed)) return "";
+  const seconds = Math.max(0, Math.floor(elapsed / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
+}
 
 export function App() {
   const {
@@ -59,6 +73,11 @@ export function App() {
   const [ghostIds, setGhostIds] = useState<string[]>([]);
   const [zones, setZones] = useState<GeofenceZone[]>([]);
   const [auth, setAuth] = useState<AuthPrincipal | null>(null);
+  const [query, setQuery] = useState("");
+  const [protocolFilter, setProtocolFilter] = useState<"all" | Protocol>("all");
+  const [ghostsOnly, setGhostsOnly] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -191,7 +210,21 @@ export function App() {
       )
     : recent;
 
-  const seenStationIds = new Set(displayed.map((o) => o.station_id));
+  const normalizedQuery = query.trim().toLowerCase();
+  const filtered = displayed.filter((o) => {
+    if (protocolFilter !== "all" && o.protocol !== protocolFilter) return false;
+    if (ghostsOnly && o.operator_id) return false;
+    if (!normalizedQuery) return true;
+    return [o.drone_id, o.operator_id, o.station_id, o.self_id]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase()
+      .includes(normalizedQuery);
+  });
+
+  // Station presence must follow the unfiltered live feed; otherwise
+  // hiding a station's observations makes its receiver look offline.
+  const seenStationIds = new Set(recent.map((o) => o.station_id));
   const stations = registeredStations.map((s) => ({
     ...s,
     online: s.online && seenStationIds.has(s.station_id),
@@ -207,7 +240,7 @@ export function App() {
   // Deduplicate down to one row per drone (the most-recent
   // observation wins, since rows are newest-first).
   const latestByDrone = new Map<string, DroneObservation>();
-  for (const o of displayed) {
+  for (const o of filtered) {
     if (!latestByDrone.has(o.drone_id)) {
       latestByDrone.set(o.drone_id, o);
     }
@@ -217,6 +250,38 @@ export function App() {
   const canOperate =
     auth === null || auth.capabilities.includes("alerts:write");
   const actorName = auth?.authenticated ? auth.display_name : null;
+
+  async function exportCurrentWindow() {
+    if (displayed.length === 0 || exporting) return;
+    const times = displayed
+      .map((o) => Date.parse(o.received_at))
+      .filter((value) => Number.isFinite(value));
+    if (times.length === 0) return;
+    setExporting(true);
+    setExportError(null);
+    try {
+      const from = new Date(Math.min(...times)).toISOString();
+      const to = new Date(Math.max(...times) + 1).toISOString();
+      const { blob, filename } = await api.exportObservations({
+        format: "csv",
+        from,
+        to,
+        unidentifiedOnly: ghostsOnly,
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      setExportError((error as Error).message);
+    } finally {
+      setExporting(false);
+    }
+  }
 
   return (
     <div className={`app ${isReplay ? "app--replay" : ""}`}>
@@ -234,6 +299,7 @@ export function App() {
         <span className="spacer" />
         <span className="stat">
           {stations.length} station · {droneCount} drone
+          {filtered.length !== displayed.length ? ` · ${filtered.length}/${displayed.length}` : ""}
         </span>
         <span
           className="stat auth-identity"
@@ -262,10 +328,15 @@ export function App() {
                   <span className={`dot ${s.online ? "online" : "offline"}`} />
                   {s.name || s.station_id}
                 </span>
-                <span className="dim">
-                  {(s.coverage_radius_m ?? 0) / 1000 > 0
-                    ? `${((s.coverage_radius_m ?? 0) / 1000).toFixed(1)} km`
-                    : s.station_id}
+                <span
+                  className="dim"
+                  title={s.last_seen ? `last seen ${s.last_seen}` : s.station_id}
+                >
+                  {!s.online && s.last_seen
+                    ? `offline ${relativeAge(s.last_seen)}`
+                    : (s.coverage_radius_m ?? 0) / 1000 > 0
+                      ? `${((s.coverage_radius_m ?? 0) / 1000).toFixed(1)} km`
+                      : s.station_id}
                 </span>
               </div>
             ))
@@ -296,6 +367,56 @@ export function App() {
               ? `Observations @ ${new Date(cursorTs as string).toLocaleTimeString("zh-CN", { hour12: false })}`
               : "Live Observations"}
           </h2>
+          <div className="obs-toolbar">
+            <input
+              className="obs-search"
+              type="search"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="搜索无人机 / 操作员 / 站点"
+              aria-label="搜索观测"
+            />
+            <select
+              className="obs-select"
+              value={protocolFilter}
+              onChange={(event) =>
+                setProtocolFilter(event.target.value as "all" | Protocol)
+              }
+              aria-label="协议筛选"
+            >
+              <option value="all">全部协议</option>
+              <option value="wifi_nan">Wi-Fi NAN</option>
+              <option value="wifi_beacon">Wi-Fi Beacon</option>
+              <option value="ble">BLE</option>
+              <option value="astm_f3411">ASTM F3411</option>
+              <option value="unknown">Unknown</option>
+            </select>
+            <label className="obs-toggle">
+              <input
+                type="checkbox"
+                checked={ghostsOnly}
+                onChange={(event) => setGhostsOnly(event.target.checked)}
+              />
+              仅未识别
+            </label>
+            <button
+              type="button"
+              className="obs-export"
+              onClick={() => void exportCurrentWindow()}
+              disabled={exporting || displayed.length === 0}
+              title="导出当前显示时间窗的 CSV"
+            >
+              {exporting ? "导出中…" : "导出 CSV"}
+            </button>
+          </div>
+          {(filtered.length !== displayed.length || exportError) && (
+            <div className="obs-filter-meta">
+              <span>
+                显示 {filtered.length} / {displayed.length} 条
+              </span>
+              {exportError && <span className="obs-filter-error">{exportError}</span>}
+            </div>
+          )}
           {replayLoading ? (
             <div className="obs-list empty">
               <p>正在取回放数据…</p>
@@ -305,6 +426,11 @@ export function App() {
               observations={latestDrones}
               selectedDroneId={selected}
               onSelect={setSelected}
+              emptyMessage={
+                displayed.length > 0
+                  ? "没有符合当前筛选条件的观测。"
+                  : undefined
+              }
             />
           )}
         </div>
@@ -318,7 +444,7 @@ export function App() {
 
       <MapView
         stations={stations}
-        observations={displayed}
+        observations={filtered}
         zones={zones}
         selectedDroneId={selected}
         onDroneClick={handleDroneClick}
