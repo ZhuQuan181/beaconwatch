@@ -300,3 +300,24 @@ def test_mqtt_client_cert_and_key_must_be_paired():
                 mqtt_client_cert="/tmp/client.crt",
             )
         )
+
+
+@pytest.mark.parametrize("payload", [b"null", b"42", b"[]", b'"protocol"', b"\xff"])
+@pytest.mark.parametrize("kind", ["obs", "info"])
+async def test_malformed_payload_is_isolated(_sqlite_settings, payload, kind):
+    sub = MqttSubscriber(_sqlite_settings)
+    await sub.handle_message(f"rid/v1/station-1/{kind}", payload)
+    assert sub.invalid == 1
+    assert sub.persisted == 0
+    assert sub.station_infos == 0
+
+
+async def test_empty_zones_are_cached(db_engine, _sqlite_settings, monkeypatch):
+    sub = MqttSubscriber(_sqlite_settings)
+    assert await sub._load_zones() == []
+
+    def unexpected_query():
+        raise AssertionError("empty cache should not query again")
+
+    monkeypatch.setattr("rid_server.mqtt_subscriber.get_session_factory", unexpected_query)
+    assert await sub._load_zones() == []
