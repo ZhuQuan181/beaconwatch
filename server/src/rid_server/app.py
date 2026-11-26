@@ -46,81 +46,80 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         bus_backend=settings.bus_backend,
     )
 
-    bus = create_bus(settings)
-    app.state.bus = bus
-    await bus.start()
+    async with contextlib.AsyncExitStack() as stack:
+        stack.push_async_callback(dispose_engine)
+        bus = create_bus(settings)
+        app.state.bus = bus
+        stack.push_async_callback(bus.stop)
+        await bus.start()
 
-    subscriber = MqttSubscriber(settings)
-    subscriber.metrics = app.state.metrics
-    app.state.subscriber = subscriber
-    notifier = (
-        NotificationWorker(settings)
-        if settings.notifications_enabled
-        else None
-    )
-    app.state.notifier = notifier
-    if notifier is not None:
-        notifier.metrics = app.state.metrics
-        await notifier.start()
-    retention = (
-        RetentionWorker(settings)
-        if (
-            settings.alert_retention_days > 0
-            or settings.notification_retention_days > 0
+        subscriber = MqttSubscriber(settings)
+        subscriber.metrics = app.state.metrics
+        app.state.subscriber = subscriber
+        notifier = (
+            NotificationWorker(settings)
+            if settings.notifications_enabled
+            else None
         )
-        else None
-    )
-    app.state.retention = retention
-    if retention is not None:
-        await retention.start()
-    # Rules run after each committed observation.  Constructing the
-    # engine here (not per message) keeps dedup state across messages —
-    # a hovering drone would otherwise re-alert at 4 Hz.
-    app.state.alerts = AlertRing(capacity=200)
-    # The API reads the durable ledger directly, but keeping the recent
-    # ring warm preserves the lightweight in-process view used by
-    # operations and makes restart behavior predictable for any caller
-    # that still reads app.state.alerts.
-    try:
-        factory = get_session_factory()
-        async with factory() as session:
-            recent = await list_alerts(session, limit=app.state.alerts.capacity)
-        for row in reversed(recent):
-            app.state.alerts.add(
-                alert_to_out(row).model_dump(mode="json")
-            )
-    except Exception as exc:  # noqa: BLE001
-        # A missing pre-migration table must not prevent the receiver
-        # from starting; live alerts will still attempt persistence.
-        log.warning("alerts.restore.failed", error=str(exc)[:200])
-    engine = AlertEngine(
-        max_alt_m=settings.alert_max_alt_m,
-        unidentified=settings.alert_unidentified,
-        dedup_seconds=settings.alert_dedup_seconds,
-    )
-    subscriber.alerts = engine
-    # Wire the bus into the subscriber so persisted observations
-    # fan out to WebSocket clients in real time.
-    set_subscriber_bus_hook(
-        subscriber,
-        bus,
-        app.state.alerts,
-        settings=settings,
-        wake_notifications=notifier.wake if notifier is not None else None,
-    )
-    await subscriber.start()
-    try:
-        yield
-    finally:
-        log.info("shutdown.begin")
-        await subscriber.stop()
+        app.state.notifier = notifier
         if notifier is not None:
-            await notifier.stop()
+            notifier.metrics = app.state.metrics
+            stack.push_async_callback(notifier.stop)
+            await notifier.start()
+        retention = (
+            RetentionWorker(settings)
+            if (
+                settings.alert_retention_days > 0
+                or settings.notification_retention_days > 0
+            )
+            else None
+        )
+        app.state.retention = retention
         if retention is not None:
-            await retention.stop()
-        await bus.stop()
-        await dispose_engine()
-        log.info("shutdown.done")
+            stack.push_async_callback(retention.stop)
+            await retention.start()
+        # Rules run after each committed observation.  Constructing the
+        # engine here (not per message) keeps dedup state across messages —
+        # a hovering drone would otherwise re-alert at 4 Hz.
+        app.state.alerts = AlertRing(capacity=200)
+        # The API reads the durable ledger directly, but keeping the recent
+        # ring warm preserves the lightweight in-process view used by
+        # operations and makes restart behavior predictable for any caller
+        # that still reads app.state.alerts.
+        try:
+            factory = get_session_factory()
+            async with factory() as session:
+                recent = await list_alerts(session, limit=app.state.alerts.capacity)
+            for row in reversed(recent):
+                app.state.alerts.add(
+                    alert_to_out(row).model_dump(mode="json")
+                )
+        except Exception as exc:  # noqa: BLE001
+            # A missing pre-migration table must not prevent the receiver
+            # from starting; live alerts will still attempt persistence.
+            log.warning("alerts.restore.failed", error=str(exc)[:200])
+        engine = AlertEngine(
+            max_alt_m=settings.alert_max_alt_m,
+            unidentified=settings.alert_unidentified,
+            dedup_seconds=settings.alert_dedup_seconds,
+        )
+        subscriber.alerts = engine
+        # Wire the bus into the subscriber so persisted observations
+        # fan out to WebSocket clients in real time.
+        set_subscriber_bus_hook(
+            subscriber,
+            bus,
+            app.state.alerts,
+            settings=settings,
+            wake_notifications=notifier.wake if notifier is not None else None,
+        )
+        stack.push_async_callback(subscriber.stop)
+        await subscriber.start()
+        try:
+            yield
+        finally:
+            log.info("shutdown.begin")
+    log.info("shutdown.done")
 
 
 def create_app() -> FastAPI:
