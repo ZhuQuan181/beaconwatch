@@ -103,3 +103,32 @@ def test_sleep_with_backoff_returns_delay():
         return await exponential_backoff.sleep_with_backoff(2, base_s=0.05, cap_s=1.0)
     delay = asyncio.run(runner())
     assert 0.05 <= delay <= 1.0
+
+
+def test_dedup_sweep_preserves_first_seen_order(monkeypatch):
+    now = 0.0
+    monkeypatch.setattr("rid_edge.common.dedup.time.monotonic", lambda: now)
+    d: Deduper[str, int] = Deduper(window_s=1.0, sweep_every=1)
+    assert not d.seen("a", 1)
+    now = 0.5
+    assert not d.seen("b", 2)
+    now = 0.75
+    assert d.seen("a", 3)
+    now = 1.0
+    assert not d.seen("c", 4)
+    assert d.get("a") is None
+    assert d.get("b") == 2
+
+
+def test_dedup_refresh_moves_expired_key_to_tail(monkeypatch):
+    now = 0.0
+    monkeypatch.setattr("rid_edge.common.dedup.time.monotonic", lambda: now)
+    d: Deduper[str, int] = Deduper(window_s=1.0, max_keys=2, sweep_every=99)
+    assert not d.seen("a", 1)
+    now = 0.5
+    assert not d.seen("b", 2)
+    now = 1.1
+    assert not d.seen("a", 3)
+    assert not d.seen("c", 4)
+    assert d.get("a") == 3
+    assert d.get("b") is None
